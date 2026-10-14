@@ -518,7 +518,7 @@ def complete(c: CompletionIn, as_of: Optional[str] = None):
         conn.execute("UPDATE tasks SET snoozed_until = NULL WHERE id = ?", (c.task_id,))
         # A mileage reading on a vehicle task also updates the vehicle's odometer.
         if c.mileage and task["asset_id"]:
-            conn.execute("UPDATE assets SET mileage = MAX(COALESCE(mileage, 0), ?) WHERE id = ?",
+            conn.execute("UPDATE assets SET mileage = MAX(COALESCE(mileage, 0), ?) WHERE id = ? AND category = 'vehicle'",
                          (c.mileage, task["asset_id"]))
         return {"id": cur.lastrowid}
 

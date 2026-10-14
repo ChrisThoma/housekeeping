@@ -5,14 +5,16 @@ const AS_OF = new URLSearchParams(location.search).get("as_of");
 const CATEGORIES = {
   appliance: "Appliances",
   home: "Home systems",
-  outdoor: "Outdoor features",
-  plant: "Plants & lawn",
+  outdoor: "Outdoor",
+  plant: "Plants and lawn",
   vehicle: "Vehicles",
 };
 const MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const $ = (sel) => document.querySelector(sel);
 const ic = (name) => `<svg class="i" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const meta = (parts) => parts.filter(Boolean).join(" · ");
 
 let state = { assets: [], tasks: [], settings: {} };
 
@@ -28,7 +30,7 @@ async function api(method, path, body) {
     body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    let msg = `Request failed (${res.status})`;
+    let msg = `Something went wrong (${res.status})`;
     try {
       const data = await res.json();
       if (data.detail) msg = typeof data.detail === "string" ? data.detail : data.detail.map((d) => d.msg).join("; ");
@@ -39,24 +41,36 @@ async function api(method, path, body) {
   return res.json();
 }
 
+// Toasts enter and leave along the same path. Timers pause while the tab is hidden, so nothing expires unseen.
 function toast(msg, isError = false) {
-  const el = document.createElement("div");
-  el.className = "toast " + (isError ? "error" : "ok");
-  el.setAttribute("role", isError ? "alert" : "status");
-  el.innerHTML = `${ic(isError ? "alert" : "check")}<span>${esc(msg)}</span>`;
   const stack = $("#toasts");
+  const el = document.createElement("div");
+  el.className = "toast" + (isError ? " error" : "");
+  el.setAttribute("role", isError ? "alert" : "status");
+  el.textContent = msg;
   stack.appendChild(el);
-  while (stack.children.length > 3) stack.firstChild.remove();
-  setTimeout(() => el.remove(), isError ? 7000 : 3000);
+  [...stack.children].filter((t) => !t.classList.contains("leaving")).slice(0, -3).forEach(dismissToast);
+  let remaining = isError ? 7000 : 3200;
+  let started = Date.now();
+  let timer = setTimeout(() => dismissToast(el), remaining);
+  el._pause = () => { clearTimeout(timer); remaining -= Date.now() - started; };
+  el._resume = () => { started = Date.now(); timer = setTimeout(() => dismissToast(el), Math.max(remaining, 800)); };
 }
+function dismissToast(el) {
+  if (el.classList.contains("leaving")) return;
+  el.classList.add("leaving");
+  el.addEventListener("transitionend", () => el.remove(), { once: true });
+  setTimeout(() => el.remove(), 400);
+}
+document.addEventListener("visibilitychange", () => {
+  document.querySelectorAll(".toast:not(.leaving)").forEach((t) => (document.hidden ? t._pause?.() : t._resume?.()));
+});
 
 function fmtMinutes(min) {
   if (min < 60) return `${min} min`;
-  const h = Math.floor(min / 60), m = min % 60;
+  const quarters = Math.round(min / 15), h = Math.floor(quarters / 4), m = (quarters % 4) * 15;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 function todayISO() {
   if (AS_OF) return AS_OF;
@@ -64,10 +78,16 @@ function todayISO() {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
 
-function fmtDate(iso) {
-  if (!iso) return "—";
+function fmtDate(iso, withYear = true) {
+  if (!iso) return "";
   const [y, m, d] = iso.split("-").map(Number);
-  return `${MONTHS[m]} ${d}, ${y}`;
+  return withYear ? `${MONTHS[m]} ${d}, ${y}` : `${MONTHS[m]} ${d}`;
+}
+
+function fmtRange(start, end) {
+  const [, m1, d1] = start.split("-").map(Number);
+  const [, m2, d2] = end.split("-").map(Number);
+  return m1 === m2 ? `${MONTHS[m1]} ${d1}–${d2}` : `${MONTHS[m1]} ${d1} – ${MONTHS[m2]} ${d2}`;
 }
 
 function scheduleText(t) {
@@ -96,11 +116,14 @@ function urgency(t) {
 function armConfirm(btn, label, action) {
   if (btn.dataset.armed) return action();
   const original = btn.innerHTML;
+  const width = btn.classList.contains("icon");
   btn.dataset.armed = "1";
   btn.textContent = label;
+  if (width) btn.classList.remove("icon");
   setTimeout(() => {
     delete btn.dataset.armed;
     btn.innerHTML = original;
+    if (width) btn.classList.add("icon");
   }, 3000);
 }
 
@@ -116,6 +139,14 @@ async function busy(btn, label, fn) {
   }
 }
 
+// Not every mobile browser focuses a tapped row, so do it here; :focus-within then reveals the row's actions.
+document.addEventListener("pointerdown", (e) => {
+  const row = e.target.closest('.row[tabindex="-1"]');
+  if (row && !e.target.closest("button, a, input, select, textarea, summary")) row.focus({ preventScroll: true });
+});
+
+const on = (root, sel, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener("click", (e) => fn(el, e)));
+
 // ---------- dialogs ----------
 
 function openDialog(id) {
@@ -126,7 +157,7 @@ function openDialog(id) {
 const closeDialog = (id) => document.getElementById(id).close();
 document.querySelectorAll("dialog.modal").forEach((d) => {
   d.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => d.close()));
-  // Close when the backdrop (the dialog element itself, outside its form) is clicked.
+  // Close when the scrim (the dialog element itself, outside its form) is clicked.
   d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
 });
 
@@ -144,15 +175,16 @@ function dropzone(inputSel, labelSel, emptyText) {
   return sync;
 }
 const syncUploadZone = dropzone("#upload-file", "#upload-file-name", "Choose a PDF, photo or text file");
-const syncGuideZone = dropzone("#guide-file", "#guide-file-name", "Or upload a PDF or photo");
+const syncGuideZone = dropzone("#guide-file", "#guide-file-name", "Or choose a PDF or photo");
 
-// ---------- tabs ----------
+// ---------- tabs (switching is instant: it happens many times a day) ----------
 
+const LOADERS = { plan: () => loadPlan(), inventory: () => loadInventory(), documents: () => loadDocuments(), tasks: () => loadTasks(), history: () => loadHistory(), settings: () => loadSettings() };
 function showTab(name) {
   document.querySelectorAll(".tab").forEach((s) => (s.hidden = s.id !== `tab-${name}`));
   document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === name));
   history.replaceState(null, "", `${location.search}#${name}`);
-  ({ plan: loadPlan, inventory: loadInventory, documents: loadDocuments, tasks: loadTasks, history: loadHistory, settings: loadSettings })[name]();
+  LOADERS[name]();
 }
 document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 document.addEventListener("click", (e) => {
@@ -168,133 +200,126 @@ document.addEventListener("click", (e) => {
 async function loadPlan(data) {
   const plan = data || (await api("GET", "/api/plan"));
   const weekly = plan.mode === "weekly";
-  $("#plan-eyebrow").textContent = weekly ? `Week of ${fmtDate(plan.start)}` : fmtDate(plan.start);
-  $("#plan-title").textContent = weekly ? "This week's maintenance" : "Today's maintenance";
-
   const done = plan.items.filter((i) => i.done).length;
+  const total = plan.items.length;
   const minutesLeft = plan.items.filter((i) => !i.done).reduce((sum, i) => sum + (i.est_minutes || 0), 0);
-  $("#plan-progress").style.width = plan.items.length ? `${(done / plan.items.length) * 100}%` : "0";
-  $("#plan-progress-wrap").hidden = $("#plan-stats").hidden = !plan.items.length;
-  $("#plan-stat-done").textContent = `${done} of ${plural(plan.items.length, "task")} done`;
-  $("#plan-stat-time").textContent = done === plan.items.length ? "All done for this period" : minutesLeft ? `About ${fmtMinutes(minutesLeft)} left` : "";
+
+  $("#plan-title").textContent = weekly ? "This week" : "Today";
+  $("#plan-sub").textContent = meta([
+    weekly ? fmtRange(plan.start, plan.end) : fmtDate(plan.start),
+    total && (done === total ? "All done" : `${done} of ${total} done`),
+    total && done < total && minutesLeft && `about ${fmtMinutes(minutesLeft)} left`,
+  ]);
+  $("#plan-progress-wrap").hidden = !total;
+  $("#plan-progress").style.transform = `scaleX(${total ? done / total : 0})`;
 
   const list = $("#plan-list");
-  list.innerHTML = plan.items.map(planItemHTML).join("");
-  list.querySelectorAll("[data-check]").forEach((b) => b.addEventListener("click", () => onCheck(plan, +b.dataset.check)));
-  list.querySelectorAll("[data-snooze]").forEach((b) =>
-    b.addEventListener("click", async () => {
-      await api("POST", `/api/tasks/${b.dataset.snooze}/snooze?days=7`);
-      toast("Snoozed for a week");
-      loadPlan();
-    })
-  );
+  list.hidden = !total;
+  list.innerHTML = plan.items.map(planRowHTML).join("");
+  on(list, "[data-check]", (b) => onCheck(plan, +b.dataset.check, b));
+  on(list, "[data-snooze]", async (b) => {
+    await api("POST", `/api/tasks/${b.dataset.snooze}/snooze?days=7`);
+    toast("Snoozed for a week");
+    loadPlan();
+  });
 
   const empty = $("#plan-empty");
-  empty.hidden = plan.items.length > 0;
-  if (!plan.items.length) empty.innerHTML = await emptyPlanHTML();
+  empty.hidden = total > 0;
+  if (!total) empty.innerHTML = await emptyPlanHTML(weekly);
 
   $("#up-next-wrap").hidden = !plan.backlog_count;
-  $("#backlog-count").textContent = plan.backlog_count ? `· ${plan.backlog_count} beyond this plan` : "";
+  $("#backlog-count").textContent = plan.backlog_count || "";
   $("#up-next").innerHTML = plan.up_next
-    .map((t) => `<li><span>${esc(t.title)}${t.asset_name ? ` <span class="muted">· ${esc(t.asset_name)}</span>` : ""}</span><span>${esc(t.reason)}</span></li>`)
+    .map((t) => `<li class="row" tabindex="-1"><div class="row-main"><div class="row-title">${esc(t.title)}</div><div class="row-meta">${esc(meta([t.asset_name, t.reason]))}</div></div></li>`)
     .join("");
   $("#plan-more").hidden = !plan.backlog_count;
-  $("#plan-regen").hidden = !plan.items.length && !plan.backlog_count;
+  $("#plan-regen").hidden = !total && !plan.backlog_count;
 }
 
-// First run: a checklist of setup steps. Afterwards: a quiet "nothing due" note.
-async function emptyPlanHTML() {
+// First run: the setup steps, drawn as the same rows the plan uses. Afterwards: a quiet "nothing due".
+async function emptyPlanHTML(weekly) {
   const [settings, assets, tasks] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/assets"), api("GET", "/api/tasks")]);
-  const active = tasks.filter((t) => t.status === "active").length;
-  if (active) {
-    return `<div class="empty">${ic("check")}<strong>Nothing is due right now</strong><p>Every active task is up to date. Enjoy the time off.</p></div>`;
+  if (tasks.some((t) => t.status === "active")) {
+    return `<div class="empty"><p class="empty-title">Nothing due ${weekly ? "this week" : "today"}</p><p>Everything is up to date.</p></div>`;
   }
-  const suggested = tasks.filter((t) => t.status === "suggested").length;
+  const suggested = tasks.some((t) => t.status === "suggested");
   const steps = [
-    [!!settings.location, "Tell it where you live", "Location and climate decide when seasonal work happens.", "settings", "Settings"],
-    [assets.length > 0, "Add what you own", "Appliances, home systems, yard and plants, cars.", "inventory", "Inventory"],
-    [suggested > 0, "Get maintenance tasks", "Have Claude suggest a schedule for each item, or import your own guide.", "inventory", "Suggest tasks"],
-    [false, "Approve the ones you want", "Your weekly plan fills up from approved tasks.", "tasks", "Review"],
+    [!!settings.location, "Set your location", "So seasonal work lands in the right months.", "settings", "Open settings"],
+    [assets.length > 0, "Add what you own", "Furnace, water heater, gutters, cars.", "inventory", "Add items"],
+    [suggested, "Get a schedule for each item", "Suggested from the make, model and manual.", "inventory", "Suggest tasks"],
+    [false, "Approve the tasks you want", "Your plan fills up from these.", "tasks", "Review"],
   ];
   const next = steps.findIndex(([done]) => !done);
   return `
-    <div class="onboard">
-      <h2>Set up your home</h2>
-      <p>Housekeeping turns everything you own into a short list of maintenance for each ${settings.plan_mode === "daily" ? "day" : "week"}. Four steps to your first plan:</p>
-      <ol class="steps">
-        ${steps.map(([done, title, sub, tab, cta], i) => `
-          <li class="${done ? "done" : ""}">
-            <div><div class="step-title">${title}</div><div class="step-sub">${sub}</div></div>
-            ${done ? "" : `<a class="btn small ${i === next ? "" : "ghost"}" href="#${tab}" data-goto="${tab}">${cta}</a>`}
-          </li>`).join("")}
-      </ol>
-    </div>`;
+    <ol class="list">
+      ${steps.map(([done, title, sub, tab, cta], i) => `
+        <li class="row task-row setup-row ${done ? "done" : ""}">
+          <span class="check" aria-hidden="true">${ic("check")}</span>
+          <div class="row-main"><div class="row-title">${title}</div><div class="row-meta">${sub}</div></div>
+          ${done ? `<span class="status done">Done</span>` : `<a class="btn small ${i === next ? "" : "quiet"}" href="#${tab}" data-goto="${tab}">${cta}</a>`}
+        </li>`).join("")}
+    </ol>`;
 }
 
-function planItemHTML(t) {
+function planRowHTML(t) {
   const u = t.done ? "done" : urgency(t);
-  const tagLabel = t.done ? "Done" : u === "overdue" ? "Overdue" : "Due";
-  const meta = [
-    t.asset_name && esc(t.asset_name),
-    esc(scheduleText(t)),
-    t.est_minutes && `~${t.est_minutes} min`,
-    !t.done && esc(t.reason),
-  ].filter(Boolean);
+  const status = t.done ? "Done" : u === "overdue" ? "Overdue" : "Due";
   return `
-    <li class="plan-item ${u}" id="plan-${t.id}">
-      <button class="check" data-check="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}: ${esc(t.title)}">${t.done ? ic("check") : ""}</button>
-      <div class="plan-body">
-        <div class="plan-title">${esc(t.title)}</div>
-        <div class="plan-meta">${meta.map((m) => `<span>${m}</span>`).join("")}</div>
-        ${t.description ? `<p class="plan-desc">${esc(t.description)}</p>` : ""}
+    <li class="row task-row ${t.done ? "done" : ""}" id="plan-${t.id}" tabindex="-1">
+      <button class="check" data-check="${t.id}" aria-pressed="${t.done}" aria-label="${esc(t.title)}">${ic("check")}</button>
+      <div class="row-main">
+        <div class="row-title">${esc(t.title)}</div>
+        <div class="row-meta">${esc(meta([t.priority === 1 && !t.done && "High priority", t.asset_name, scheduleText(t), t.est_minutes && `${t.est_minutes} min`, !t.done && t.reason]))}</div>
+        ${t.description ? `<p class="row-desc">${esc(t.description)}</p>` : ""}
       </div>
-      <div class="plan-side">
-        <span class="tag-row">
-          ${t.priority === 1 && !t.done ? `<span class="tag">High priority</span>` : ""}
-          <span class="tag ${u === "ok" ? "due" : u}">${tagLabel}</span>
-        </span>
-        ${t.done ? "" : `<button class="btn ghost small" data-snooze="${t.id}">${ic("clock")}Snooze a week</button>`}
+      <div class="task-side">
+        <span class="status ${u === "ok" ? "" : u}">${status}</span>
+        ${t.done ? "" : `<button class="btn quiet small reveal no-print" data-snooze="${t.id}">Snooze</button>`}
       </div>
     </li>`;
 }
 
-async function onCheck(plan, taskId) {
+// The check responds on press: the row flips to done right away, then the server catches up.
+async function onCheck(plan, taskId, btn) {
   const item = plan.items.find((i) => i.id === taskId);
-  if (item.done) {
-    await api("DELETE", `/api/completions/${item.completion_id}`);
-    return loadPlan();
+  const row = btn.closest(".row");
+  if (!item.done && item.recurrence === "mileage") return showMileageForm(item);
+  row.classList.toggle("done", !item.done);
+  try {
+    if (item.done) await api("DELETE", `/api/completions/${item.completion_id}`);
+    else await api("POST", "/api/completions", { task_id: taskId });
+  } catch {
+    row.classList.toggle("done", item.done);
+    return;
   }
-  if (item.recurrence === "mileage") return showMileageForm(item);
-  await api("POST", "/api/completions", { task_id: taskId });
-  toast(`Logged: ${item.title}`);
-  loadPlan();
+  setTimeout(loadPlan, 320);   // let the check finish drawing before the list re-renders
 }
 
 function showMileageForm(item) {
   const li = $(`#plan-${item.id}`);
-  if (li.querySelector(".inline-done")) return;
+  if (li.querySelector(".inline-done")) return li.querySelector("input").focus();
   const form = document.createElement("form");
   form.className = "inline-done";
   form.innerHTML = `
-    <label>Odometer reading <input id="mi-${item.id}" type="number" min="0" placeholder="${item.asset_mileage ?? ""}"></label>
-    <label>Notes <input id="notes-${item.id}" placeholder="Shop, oil type, cost"></label>
-    <button class="btn small" type="submit">${ic("check")}Log it</button>`;
+    <label>Odometer <input id="mi-${item.id}" type="number" min="0" inputmode="numeric" placeholder="${item.asset_mileage ?? ""}"></label>
+    <label>Notes <input id="notes-${item.id}" placeholder="Shop, oil, cost"></label>
+    <button class="btn small" type="submit">Log</button>`;
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const mileage = form.querySelector(`#mi-${item.id}`).value;
+    li.classList.add("done");
     await api("POST", "/api/completions", {
       task_id: item.id,
       mileage: mileage ? +mileage : null,
       notes: form.querySelector(`#notes-${item.id}`).value,
     });
-    toast(`Logged: ${item.title}`);
-    loadPlan();
+    setTimeout(loadPlan, 320);
   });
   li.appendChild(form);
   form.querySelector("input").focus();
 }
 
-$("#plan-regen").addEventListener("click", (e) => busy(e.currentTarget, "Rebuilding…", async () => { await loadPlan(await api("POST", "/api/plan/regenerate")); toast("Plan rebuilt"); }));
+$("#plan-regen").addEventListener("click", (e) => busy(e.currentTarget, "Rebuilding", async () => loadPlan(await api("POST", "/api/plan/regenerate"))));
 $("#plan-more").addEventListener("click", async () => loadPlan(await api("POST", "/api/plan/more?n=1")));
 
 // ---------- inventory ----------
@@ -303,74 +328,61 @@ async function loadInventory() {
   state.assets = await api("GET", "/api/assets");
   const wrap = $("#inventory-list");
   if (!state.assets.length) {
-    wrap.innerHTML = `<div class="empty">${ic("inventory")}<strong>Nothing here yet</strong><p>Start with the things that cost the most to neglect: furnace, water heater, roof and gutters, your cars.</p><button class="btn" data-new-asset>${ic("plus")}Add your first item</button></div>`;
-    wrap.querySelector("[data-new-asset]").addEventListener("click", () => openAssetForm());
+    wrap.innerHTML = `<div class="empty"><p class="empty-title">Nothing here yet</p><p>Start with what costs the most to neglect: furnace, water heater, roof and gutters, cars.</p><button class="btn" data-new-asset>Add an item</button></div>`;
+    on(wrap, "[data-new-asset]", () => openAssetForm());
     return;
   }
   const groups = {};
   state.assets.forEach((a) => (groups[a.category] ||= []).push(a));
   wrap.innerHTML = Object.keys(CATEGORIES)
     .filter((c) => groups[c])
-    .map(
-      (c) => `
-      <div class="cat-block">
-        <h2 class="cat-title">${CATEGORIES[c]} <span class="muted">${groups[c].length}</span></h2>
-        <div class="rows">${groups[c].map(assetRowHTML).join("")}</div>
-      </div>`
-    )
+    .map((c) => `<h2 class="section-title">${CATEGORIES[c]} <span class="count">${groups[c].length}</span></h2><ul class="list">${groups[c].map(assetRowHTML).join("")}</ul>`)
     .join("");
-  wrap.querySelectorAll("[data-suggest]").forEach((b) =>
-    b.addEventListener("click", () =>
-      busy(b, "Asking Claude…", async () => {
-        const r = await api("POST", `/api/assets/${b.dataset.suggest}/suggest`);
-        toast(r.added ? `${r.added} suggestions ready to review under Tasks` : "No new tasks suggested");
-        refreshBadge();
-        loadInventory();
-      })
-    )
+  on(wrap, "[data-suggest]", (b) =>
+    busy(b, "Thinking", async () => {
+      const r = await api("POST", `/api/assets/${b.dataset.suggest}/suggest`);
+      toast(r.added ? `${plural(r.added, "suggestion")} to review in Tasks` : "No new tasks to suggest");
+      refreshBadge();
+      loadInventory();
+    })
   );
-  wrap.querySelectorAll("[data-find]").forEach((b) =>
-    b.addEventListener("click", () =>
-      busy(b, "Searching the web…", async () => {
-        const r = await api("POST", `/api/assets/${b.dataset.find}/find-documents`);
-        toast(findSummary(r), !r.added.length && r.skipped.length > 0);
-        loadInventory();
-      })
-    )
+  on(wrap, "[data-find]", (b) =>
+    busy(b, "Searching", async () => {
+      const r = await api("POST", `/api/assets/${b.dataset.find}/find-documents`);
+      toast(findSummary(r), !r.added.length && r.skipped.length > 0);
+      loadInventory();
+    })
   );
-  wrap.querySelectorAll("[data-edit-asset]").forEach((b) => b.addEventListener("click", () => openAssetForm(state.assets.find((a) => a.id === +b.dataset.editAsset))));
-  wrap.querySelectorAll("[data-del-asset]").forEach((b) =>
-    b.addEventListener("click", () =>
-      armConfirm(b, "Delete item and its tasks?", async () => {
-        await api("DELETE", `/api/assets/${b.dataset.delAsset}`);
-        toast("Deleted");
-        loadInventory();
-      })
-    )
+  on(wrap, "[data-edit-asset]", (b) => openAssetForm(state.assets.find((a) => a.id === +b.dataset.editAsset)));
+  on(wrap, "[data-del-asset]", (b) =>
+    armConfirm(b, "Delete with its tasks?", async () => {
+      await api("DELETE", `/api/assets/${b.dataset.delAsset}`);
+      toast("Deleted");
+      loadInventory();
+    })
   );
 }
 
 function assetRowHTML(a) {
-  const sub = [a.details, a.year, a.mileage != null && `${Number(a.mileage).toLocaleString()} mi`].filter(Boolean).map(esc).join(" · ");
-  const chips = [
-    a.task_count && `<span class="chip">${plural(a.task_count, "active task")}</span>`,
-    a.suggested_count && `<a class="chip accent" href="#tasks" data-goto="tasks">${a.suggested_count} to review</a>`,
-    a.doc_count && `<a class="chip" href="#documents" data-goto="documents">${plural(a.doc_count, "document")}</a>`,
-  ].filter(Boolean).join("");
+  const facts = meta([a.details, a.year, a.mileage != null && `${Number(a.mileage).toLocaleString()} mi`].map((x) => x && esc(x)));
+  const links = [
+    a.task_count && plural(a.task_count, "task"),
+    a.suggested_count && `<a href="#tasks" data-goto="tasks">${a.suggested_count} to review</a>`,
+    a.doc_count && `<a href="#documents" data-goto="documents">${plural(a.doc_count, "manual")}</a>`,
+  ];
   return `
-    <div class="asset-row">
-      <div class="asset-info">
-        <div class="asset-name">${esc(a.name)}</div>
-        <div class="asset-sub">${sub || "No details yet. Add the brand and model for better suggestions."}</div>
-        ${chips ? `<div class="chips">${chips}</div>` : ""}
+    <li class="row" tabindex="-1">
+      <div class="row-main">
+        <div class="row-title">${esc(a.name)}</div>
+        <div class="row-meta">${meta([facts || "Add the make and model for better suggestions", ...links])}</div>
       </div>
-      <div class="actions">
-        <button class="btn ghost small" data-find="${a.id}">${ic("search")}Find manuals</button>
-        <button class="btn small" data-suggest="${a.id}">${ic("sparkle")}Suggest tasks</button>
-        <button class="btn ghost small" data-edit-asset="${a.id}" aria-label="Edit ${esc(a.name)}">${ic("edit")}</button>
-        <button class="btn danger small" data-del-asset="${a.id}" aria-label="Delete ${esc(a.name)}">${ic("trash")}</button>
+      <div class="row-actions">
+        <button class="btn quiet small icon danger reveal" data-del-asset="${a.id}" aria-label="Delete ${esc(a.name)}">${ic("trash")}</button>
+        <button class="btn quiet small icon reveal" data-edit-asset="${a.id}" aria-label="Edit ${esc(a.name)}">${ic("edit")}</button>
+        <button class="btn quiet small reveal" data-find="${a.id}">Find manuals</button>
+        <button class="btn secondary small" data-suggest="${a.id}">Suggest tasks</button>
       </div>
-    </div>`;
+    </li>`;
 }
 
 function openAssetForm(a = {}) {
@@ -408,15 +420,15 @@ $("#asset-form").addEventListener("submit", async (e) => {
   loadInventory();
 });
 
-// ---------- documents ----------
+// ---------- manuals ----------
 
-const KIND_LABELS = { manual: "Owner's manual", maintenance: "Maintenance schedule", guide: "Guide", photo: "Photo", other: "Document" };
-const SOURCE_LABELS = { found: "Found by Claude", uploaded: "Uploaded", link: "From a link" };
+const KIND_LABELS = { manual: "Owner's manual", maintenance: "Maintenance schedule", guide: "Checklist", photo: "Photo", other: "Document" };
+const SOURCE_LABELS = { found: "Found online", uploaded: "Uploaded", link: "From a link" };
 
 function findSummary(r) {
-  if (!r.found) return "Claude couldn't find manuals for this item. Try adding the exact model under Edit, or upload one.";
+  if (!r.found) return "No manuals found. Adding the exact model usually helps.";
   const parts = [];
-  if (r.added.length) parts.push(`Saved ${r.added.length} document${r.added.length > 1 ? "s" : ""}: ${r.added.map((d) => d.title).join(", ")}`);
+  if (r.added.length) parts.push(`Saved ${r.added.map((d) => d.title).join(", ")}`);
   if (r.skipped.length) parts.push(`Skipped ${r.skipped.length} (${r.skipped.map((d) => d.reason).join("; ")})`);
   const unread = r.added.filter((d) => d.read_error);
   if (unread.length) parts.push(`Couldn't read ${unread.length}: ${unread[0].read_error}`);
@@ -424,7 +436,7 @@ function findSummary(r) {
 }
 
 function fillAssetSelects() {
-  const opts = `<option value="">General (whole home)</option>` + state.assets.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("");
+  const opts = `<option value="">Whole home</option>` + state.assets.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("");
   document.querySelectorAll(".asset-select").forEach((sel) => {
     const v = sel.value;
     sel.innerHTML = opts;
@@ -438,97 +450,81 @@ async function loadDocuments() {
   fillAssetSelects();
   const wrap = $("#documents-list");
   if (!docs.length) {
-    wrap.innerHTML = `<div class="empty">${ic("documents")}<strong>No documents yet</strong><p>Upload a manual or a photo of an appliance's data plate, or use <a href="#inventory" data-goto="inventory">Find manuals</a> on an item under Inventory.</p></div>`;
+    wrap.innerHTML = `<div class="empty"><p class="empty-title">No manuals yet</p><p>Upload a PDF or a photo of a data plate, or use <a href="#inventory" data-goto="inventory">Find manuals</a> on an item.</p></div>`;
     return;
   }
   const groups = new Map();
   docs.forEach((d) => {
-    const key = d.asset_name || "General";
+    const key = d.asset_name || "Whole home";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(d);
   });
-  const ordered = [...groups.keys()].sort((a, b) => (a === "General" ? -1 : b === "General" ? 1 : a.localeCompare(b)));
-  wrap.innerHTML = ordered.map((k) => `<div class="cat-block"><h2 class="cat-title">${esc(k)} <span class="muted">${groups.get(k).length}</span></h2><div class="rows">${groups.get(k).map(docHTML).join("")}</div></div>`).join("");
+  const ordered = [...groups.keys()].sort((a, b) => (a === "Whole home" ? -1 : b === "Whole home" ? 1 : a.localeCompare(b)));
+  wrap.innerHTML = ordered.map((k) => `<h2 class="section-title">${esc(k)}</h2><ul class="list">${groups.get(k).map(docRowHTML).join("")}</ul>`).join("");
 
-  wrap.querySelectorAll("[data-read]").forEach((b) =>
-    b.addEventListener("click", () =>
-      busy(b, "Reading…", async () => {
-        await api("POST", `/api/documents/${b.dataset.read}/read`);
-        toast("Notes updated");
-        loadDocuments();
-      })
-    )
+  on(wrap, "[data-read]", (b) =>
+    busy(b, "Reading", async () => {
+      await api("POST", `/api/documents/${b.dataset.read}/read`);
+      toast("Notes updated");
+      loadDocuments();
+    })
   );
-  wrap.querySelectorAll("[data-doc-tasks]").forEach((b) =>
-    b.addEventListener("click", () =>
-      busy(b, "Asking Claude…", async () => {
-        const r = await api("POST", `/api/documents/${b.dataset.docTasks}/tasks`);
-        toast(r.added ? `${r.added} suggestions ready to review under Tasks` : "No new tasks suggested");
-        refreshBadge();
-      })
-    )
+  on(wrap, "[data-doc-tasks]", (b) =>
+    busy(b, "Thinking", async () => {
+      const r = await api("POST", `/api/documents/${b.dataset.docTasks}/tasks`);
+      toast(r.added ? `${plural(r.added, "suggestion")} to review in Tasks` : "No new tasks to suggest");
+      refreshBadge();
+    })
   );
-  wrap.querySelectorAll("[data-del-doc]").forEach((b) =>
-    b.addEventListener("click", () =>
-      armConfirm(b, "Delete document?", async () => {
-        await api("DELETE", `/api/documents/${b.dataset.delDoc}`);
-        loadDocuments();
-      })
-    )
+  on(wrap, "[data-del-doc]", (b) =>
+    armConfirm(b, "Delete?", async () => {
+      await api("DELETE", `/api/documents/${b.dataset.delDoc}`);
+      loadDocuments();
+    })
   );
 }
 
-function docHTML(d) {
-  const meta = [
-    KIND_LABELS[d.kind] || "Document",
-    d.pages && `${d.pages} pages`,
-    SOURCE_LABELS[d.source],
-    d.read_mode === "text" && "read as text (long PDF)",
-  ].filter(Boolean);
+function docRowHTML(d) {
   const n = d.notes;
+  const counts = n && meta([n.maintenance.length && plural(n.maintenance.length, "interval"), n.parts.length && plural(n.parts.length, "part")]);
   const notes = n
-    ? `<details>
-        <summary>What Claude found${n.maintenance.length ? ` · ${n.maintenance.length} maintenance item${n.maintenance.length > 1 ? "s" : ""}` : ""}${n.parts.length ? ` · ${n.parts.length} part${n.parts.length > 1 ? "s" : ""}` : ""}</summary>
+    ? `<details class="doc-notes">
+        <summary>Notes${counts ? ` · ${counts}` : ""}</summary>
         <div class="notes">
-          <p>${esc(n.summary)}${n.model_identified ? ` <strong>Model: ${esc(n.model_identified)}</strong>` : ""}</p>
-          ${n.maintenance.length ? `<div><h4>Maintenance</h4><ul>${n.maintenance.map((m) => `<li><strong>${esc(m.task)}</strong>: ${esc(m.frequency)}. ${esc(m.details)} ${m.page ? `<span class="page">p. ${esc(m.page)}</span>` : ""}</li>`).join("")}</ul></div>` : ""}
-          ${n.parts.length ? `<div><h4>Parts &amp; specs</h4><ul>${n.parts.map((p) => `<li>${esc(p.name)}: <span class="mono">${esc(p.spec)}</span></li>`).join("")}</ul></div>` : ""}
-          ${n.warnings.length ? `<div><h4>Warnings</h4><ul class="warn">${n.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+          <p>${esc(n.summary)}${n.model_identified ? ` Model ${esc(n.model_identified)}.` : ""}</p>
+          ${n.maintenance.length ? `<div><h3>Maintenance</h3><ul>${n.maintenance.map((m) => `<li>${esc(m.task)}, ${esc(m.frequency)}. ${esc(m.details)} ${m.page ? `<span class="page">p. ${esc(m.page)}</span>` : ""}</li>`).join("")}</ul></div>` : ""}
+          ${n.parts.length ? `<div><h3>Parts</h3><ul>${n.parts.map((p) => `<li>${esc(p.name)}: ${esc(p.spec)}</li>`).join("")}</ul></div>` : ""}
+          ${n.warnings.length ? `<div><h3>Warnings</h3><ul class="warn">${n.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
         </div>
       </details>`
-    : `<div class="unread">${ic("alert")}Claude hasn't read this yet, so suggestions won't use it.</div>`;
+    : `<div class="doc-notes row-meta unread">Not read yet, so suggestions won't use it.</div>`;
   return `
-    <div class="doc">
-      <div class="doc-head">
-        <div>
-          <span class="doc-icon">${ic(d.kind === "photo" ? "search" : "documents")}</span>
-          <div>
-            <a class="doc-title" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">${esc(d.title)}</a>
-            <div class="plan-meta">${meta.map((m) => `<span>${esc(m)}</span>`).join("")}${d.source_url ? `<a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Source ${ic("external")}</a>` : ""}</div>
-          </div>
-        </div>
-        <div class="actions">
-          <button class="btn small" data-doc-tasks="${d.id}">${ic("sparkle")}${d.asset_id ? "Suggest tasks" : "Turn into tasks"}</button>
-          <button class="btn ghost small" data-read="${d.id}">${ic("refresh")}${n ? "Read again" : "Read now"}</button>
-          <button class="btn danger small" data-del-doc="${d.id}" aria-label="Delete ${esc(d.title)}">${ic("trash")}</button>
-        </div>
+    <li class="row" tabindex="-1">
+      <div class="row-main">
+        <a class="row-title" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">${esc(d.title)}</a>
+        <div class="row-meta">${meta([esc(KIND_LABELS[d.kind] || "Document"), d.pages && plural(d.pages, "page"), d.source_url ? `<a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">${SOURCE_LABELS[d.source]}</a>` : SOURCE_LABELS[d.source]])}</div>
+      </div>
+      <div class="row-actions">
+        <button class="btn quiet small icon danger reveal" data-del-doc="${d.id}" aria-label="Delete ${esc(d.title)}">${ic("trash")}</button>
+        <button class="btn quiet small reveal" data-read="${d.id}">${n ? "Read again" : "Read now"}</button>
+        <button class="btn secondary small" data-doc-tasks="${d.id}">${d.asset_id ? "Suggest tasks" : "Make tasks"}</button>
       </div>
       ${notes}
-    </div>`;
+    </li>`;
 }
 
 $("#upload-open").addEventListener("click", () => openDialog("upload-dialog"));
 $("#link-open").addEventListener("click", () => { openDialog("link-dialog"); $("#link-url").focus(); });
 
 function afterAdd(r) {
-  if (r.read_error) toast(`Saved, but Claude couldn't read it: ${r.read_error}`, true);
-  else toast(`Saved and read: ${r.document.title}`);
+  if (r.read_error) toast(`Saved, but it couldn't be read: ${r.read_error}`, true);
+  else toast(`Added ${r.document.title}`);
   loadDocuments();
 }
 
 $("#upload-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  busy($("#upload-submit"), "Uploading and reading…", async () => {
+  busy($("#upload-submit"), "Reading", async () => {
     const form = new FormData();
     form.append("file", $("#upload-file").files[0]);
     if ($("#upload-asset").value) form.append("asset_id", $("#upload-asset").value);
@@ -544,7 +540,7 @@ $("#upload-form").addEventListener("submit", (e) => {
 
 $("#link-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  busy($("#link-submit"), "Downloading and reading…", async () => {
+  busy($("#link-submit"), "Downloading", async () => {
     const r = await api("POST", "/api/documents/link", {
       url: $("#link-url").value.trim(),
       asset_id: $("#link-asset").value ? +$("#link-asset").value : null,
@@ -558,6 +554,8 @@ $("#link-form").addEventListener("submit", (e) => {
 
 // ---------- tasks ----------
 
+const openTaskById = (b) => openTaskForm(state.tasks.find((t) => t.id === +b.dataset.editTask));
+
 async function loadTasks() {
   [state.tasks, state.assets] = await Promise.all([api("GET", "/api/tasks"), api("GET", "/api/assets")]);
   const suggested = state.tasks.filter((t) => t.status === "suggested");
@@ -565,27 +563,23 @@ async function loadTasks() {
   const paused = state.tasks.filter((t) => t.status === "paused");
   refreshBadge(suggested.length);
 
+  const sList = $("#suggested-list");
   $("#suggested-wrap").hidden = !suggested.length;
-  $("#suggested-count").textContent = `· ${suggested.length}`;
-  $("#suggested-list").innerHTML = suggested.map(suggestionHTML).join("");
-  $("#suggested-list").querySelectorAll("[data-approve]").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const last = $(`#last-${b.dataset.approve}`).value || null;
-      await api("POST", `/api/tasks/${b.dataset.approve}/approve`, { last_done_on: last });
-      loadTasks();
-    })
-  );
-  $("#suggested-list").querySelectorAll("[data-dismiss]").forEach((b) =>
-    b.addEventListener("click", async () => {
-      await api("DELETE", `/api/tasks/${b.dataset.dismiss}`);
-      loadTasks();
-    })
-  );
-  $("#suggested-list").querySelectorAll("[data-edit-task]").forEach((b) => b.addEventListener("click", () => openTaskForm(state.tasks.find((t) => t.id === +b.dataset.editTask))));
+  $("#suggested-count").textContent = suggested.length;
+  sList.innerHTML = suggested.map(suggestionRowHTML).join("");
+  on(sList, "[data-approve]", async (b) => {
+    await api("POST", `/api/tasks/${b.dataset.approve}/approve`, { last_done_on: $(`#last-${b.dataset.approve}`).value || null });
+    loadTasks();
+  });
+  on(sList, "[data-dismiss]", async (b) => {
+    await api("DELETE", `/api/tasks/${b.dataset.dismiss}`);
+    loadTasks();
+  });
+  on(sList, "[data-edit-task]", openTaskById);
+  $("#approve-all-wrap").innerHTML = suggested.length > 1 ? `<button class="btn secondary small" id="approve-all">Approve all ${suggested.length}</button>` : "";
   if (suggested.length > 1) {
-    $("#suggested-list").insertAdjacentHTML("beforeend", `<div class="form-actions"><button class="btn ghost" id="approve-all">${ic("check")}Approve all ${suggested.length}</button></div>`);
     $("#approve-all").addEventListener("click", (e) =>
-      busy(e.currentTarget, "Approving…", async () => {
+      busy(e.currentTarget, "Approving", async () => {
         for (const t of suggested) {
           await api("POST", `/api/tasks/${t.id}/approve`, { last_done_on: $(`#last-${t.id}`).value || null });
         }
@@ -595,73 +589,66 @@ async function loadTasks() {
     );
   }
 
-  const head = `<thead><tr><th>Task</th><th>Schedule</th><th>Last done</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>`;
-  $("#active-title").innerHTML = `Active <span class="muted">${active.length || ""}</span>`;
-  $("#task-table").innerHTML = active.length
-    ? head + `<tbody>${active.map((t) => taskRowHTML(t, false)).join("")}</tbody>`
-    : `<tr><td class="empty-cell">No active tasks yet. Approve some suggestions, or add your own.</td></tr>`;
+  $("#active-title").innerHTML = `Active <span class="count">${active.length || ""}</span>`;
+  $("#task-list").innerHTML = active.length
+    ? active.map((t) => taskRowHTML(t, false)).join("")
+    : `<li class="empty-row">No active tasks yet. Approve a suggestion or add your own.</li>`;
   $("#paused-wrap").hidden = !paused.length;
-  $("#paused-table").innerHTML = head + `<tbody>${paused.map((t) => taskRowHTML(t, true)).join("")}</tbody>`;
+  $("#paused-list").innerHTML = paused.map((t) => taskRowHTML(t, true)).join("");
 
-  document.querySelectorAll("#tab-tasks table [data-edit-task]").forEach((b) => b.addEventListener("click", () => openTaskForm(state.tasks.find((t) => t.id === +b.dataset.editTask))));
-  document.querySelectorAll("[data-pause]").forEach((b) => b.addEventListener("click", async () => { await api("POST", `/api/tasks/${b.dataset.pause}/status/paused`); loadTasks(); }));
-  document.querySelectorAll("[data-resume]").forEach((b) => b.addEventListener("click", async () => { await api("POST", `/api/tasks/${b.dataset.resume}/status/active`); loadTasks(); }));
-  document.querySelectorAll("[data-done-now]").forEach((b) =>
-    b.addEventListener("click", async () => {
-      await api("POST", "/api/completions", { task_id: +b.dataset.doneNow });
-      toast("Logged as done today");
-      loadTasks();
-    })
-  );
-  document.querySelectorAll("[data-del-task]").forEach((b) =>
-    b.addEventListener("click", () => armConfirm(b, "Delete for good?", async () => { await api("DELETE", `/api/tasks/${b.dataset.delTask}`); loadTasks(); }))
-  );
+  const tab = $("#tab-tasks");
+  on(tab, "#task-list [data-edit-task], #paused-list [data-edit-task]", openTaskById);
+  on(tab, "[data-pause]", async (b) => { await api("POST", `/api/tasks/${b.dataset.pause}/status/paused`); loadTasks(); });
+  on(tab, "[data-resume]", async (b) => { await api("POST", `/api/tasks/${b.dataset.resume}/status/active`); loadTasks(); });
+  on(tab, "[data-done-now]", async (b) => {
+    await api("POST", "/api/completions", { task_id: +b.dataset.doneNow });
+    toast("Logged for today");
+    loadTasks();
+  });
+  on(tab, "[data-del-task]", (b) => armConfirm(b, "Delete?", async () => { await api("DELETE", `/api/tasks/${b.dataset.delTask}`); loadTasks(); }));
 }
 
-function suggestionHTML(t) {
+function suggestionRowHTML(t) {
   return `
-    <div class="suggestion">
-      <div class="suggestion-head">
-        <div>
-          <div class="plan-title">${esc(t.title)}</div>
-          <div class="plan-meta">
-            <span>${esc(t.asset_name || "General")}</span><span>${esc(scheduleText(t))}</span>
-            ${t.est_minutes ? `<span>~${t.est_minutes} min</span>` : ""}
-            <span>${t.source === "guide" ? "From your guide" : "Suggested by Claude"}</span>
-          </div>
-        </div>
-        ${t.priority === 1 ? `<span class="tag">High priority</span>` : ""}
+    <li class="row suggestion">
+      <div class="row-main">
+        <div class="row-title">${esc(t.title)}</div>
+        <div class="row-meta">${esc(meta([t.priority === 1 && "High priority", t.asset_name || "Whole home", scheduleText(t), t.est_minutes && `${t.est_minutes} min`, t.source === "guide" && "From your checklist"]))}</div>
+        ${t.description ? `<p class="row-desc">${esc(t.description)}</p>` : ""}
       </div>
-      ${t.description ? `<p class="plan-desc">${esc(t.description)}</p>` : ""}
-      <div class="suggestion-actions">
-        <label>Last done (optional) <input type="date" id="last-${t.id}" max="${todayISO()}"></label>
-        <button class="btn small" data-approve="${t.id}">${ic("check")}Approve</button>
-        <button class="btn ghost small" data-edit-task="${t.id}">${ic("edit")}Edit</button>
-        <button class="btn danger small" data-dismiss="${t.id}">${ic("x")}Dismiss</button>
+      <div class="suggestion-foot">
+        <label>Last done <input type="date" id="last-${t.id}" max="${todayISO()}" aria-label="Last done, optional"></label>
+        <button class="btn quiet small" data-dismiss="${t.id}">Dismiss</button>
+        <button class="btn quiet small" data-edit-task="${t.id}">Edit</button>
+        <button class="btn small" data-approve="${t.id}">Approve</button>
       </div>
-    </div>`;
+    </li>`;
 }
 
 function taskRowHTML(t, paused) {
   const u = paused ? "" : urgency(t);
   return `
-    <tr>
-      <td><div>${esc(t.title)}</div><div class="sub">${esc(t.asset_name || "General")}</div></td>
-      <td>${esc(scheduleText(t))}</td>
-      <td class="num">${fmtDate(t.last_done_on)}</td>
-      <td>${paused ? `<span class="sub">Paused</span>` : `<span class="status"><span class="status-dot ${u}"></span>${esc(t.reason || "")}</span>`}</td>
-      <td class="actions-cell">
+    <li class="row" tabindex="-1">
+      <div class="row-main">
+        <div class="row-title">${esc(t.title)}</div>
+        <div class="row-meta">${esc(meta([t.asset_name || "Whole home", scheduleText(t), t.last_done_on && `last ${fmtDate(t.last_done_on)}`]))}</div>
+      </div>
+      <div class="row-actions">
         ${paused
-          ? `<button class="btn ghost small" data-resume="${t.id}">${ic("play")}Resume</button><button class="btn danger small" data-del-task="${t.id}" aria-label="Delete ${esc(t.title)}">${ic("trash")}</button>`
-          : `<button class="btn ghost small" data-done-now="${t.id}">${ic("check")}Done today</button><button class="btn ghost small" data-edit-task="${t.id}" aria-label="Edit ${esc(t.title)}">${ic("edit")}</button><button class="btn ghost small" data-pause="${t.id}" aria-label="Pause ${esc(t.title)}">${ic("pause")}</button>`}
-      </td>
-    </tr>`;
+          ? `<button class="btn quiet small icon danger reveal" data-del-task="${t.id}" aria-label="Delete ${esc(t.title)}">${ic("trash")}</button>
+             <button class="btn quiet small" data-resume="${t.id}">Resume</button>`
+          : `<button class="btn quiet small icon reveal" data-edit-task="${t.id}" aria-label="Edit ${esc(t.title)}">${ic("edit")}</button>
+             <button class="btn quiet small reveal" data-pause="${t.id}">Pause</button>
+             <button class="btn quiet small reveal" data-done-now="${t.id}">Done today</button>
+             <span class="status ${u === "ok" ? "" : u}"><span class="dot ${u}"></span>${esc(t.reason || "")}</span>`}
+      </div>
+    </li>`;
 }
 
 function openTaskForm(t = {}) {
   openDialog("task-dialog");
   $("#task-dialog-title").textContent = t.id ? (t.status === "suggested" ? "Edit suggestion" : "Edit task") : "Add task";
-  $("#task-asset").innerHTML = `<option value="">General (no item)</option>` + state.assets.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("");
+  $("#task-asset").innerHTML = `<option value="">Whole home</option>` + state.assets.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("");
   $("#task-id").value = t.id ?? "";
   $("#task-status").value = t.status ?? "active";
   $("#task-source").value = t.source ?? "manual";
@@ -711,11 +698,11 @@ $("#guide-open").addEventListener("click", () => { openDialog("guide-dialog"); $
 $("#guide-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const file = $("#guide-file").files[0];
-  if (!file && !$("#guide-text").value.trim()) return toast("Paste your guide or choose a file first", true);
-  busy($("#guide-submit"), "Reading your guide…", async () => {
+  if (!file && !$("#guide-text").value.trim()) return $("#guide-text").focus();
+  busy($("#guide-submit"), "Reading", async () => {
     let r;
     if (file) {
-      // Keep the file under Documents as a general guide, then turn it into tasks.
+      // Keep the file under Manuals as a whole-home checklist, then turn it into tasks.
       const form = new FormData();
       form.append("file", file);
       form.append("kind", "guide");
@@ -727,7 +714,7 @@ $("#guide-form").addEventListener("submit", (e) => {
     } else {
       r = await api("POST", "/api/guide", { text: $("#guide-text").value });
     }
-    toast(`${plural(r.added, "task")} ready to review`);
+    toast(`${plural(r.added, "task")} to review`);
     closeDialog("guide-dialog");
     $("#guide-text").value = "";
     loadTasks();
@@ -745,27 +732,27 @@ async function refreshBadge(n) {
 
 async function loadHistory() {
   const rows = await api("GET", "/api/history");
-  const t = $("#history-table");
+  const list = $("#history-list");
   if (!rows.length) {
-    t.innerHTML = `<tr><td class="empty-cell">Nothing logged yet. Check items off your plan and they show up here.</td></tr>`;
+    list.innerHTML = `<li class="empty-row">Nothing logged yet. Tick things off your plan and they'll show up here.</li>`;
     return;
   }
-  t.innerHTML =
-    `<thead><tr><th>Date</th><th>Task</th><th>Notes</th><th><span class="sr-only">Actions</span></th></tr></thead>` +
-    rows
-      .map(
-        (r) => `
-      <tr>
-        <td class="num">${fmtDate(r.done_on)}</td>
-        <td><div>${esc(r.title)}</div><div class="sub">${esc(r.asset_name || "General")}</div></td>
-        <td>${[r.mileage && `${Number(r.mileage).toLocaleString()} mi`, r.notes].filter(Boolean).map(esc).join(" · ") || ""}</td>
-        <td class="actions-cell"><button class="btn danger small" data-undo="${r.id}" aria-label="Remove entry">${ic("trash")}</button></td>
-      </tr>`
-      )
-      .join("");
-  t.querySelectorAll("[data-undo]").forEach((b) =>
-    b.addEventListener("click", () => armConfirm(b, "Remove entry?", async () => { await api("DELETE", `/api/completions/${b.dataset.undo}`); loadHistory(); }))
-  );
+  list.innerHTML = rows
+    .map(
+      (r) => `
+      <li class="row" tabindex="-1">
+        <div class="row-main">
+          <div class="row-title">${esc(r.title)}</div>
+          <div class="row-meta">${esc(meta([r.asset_name || "Whole home", r.mileage && `${Number(r.mileage).toLocaleString()} mi`, r.notes]))}</div>
+        </div>
+        <div class="row-actions">
+          <button class="btn quiet small icon danger reveal" data-undo="${r.id}" aria-label="Remove entry">${ic("trash")}</button>
+          <span class="status">${fmtDate(r.done_on)}</span>
+        </div>
+      </li>`
+    )
+    .join("");
+  on(list, "[data-undo]", (b) => armConfirm(b, "Remove?", async () => { await api("DELETE", `/api/completions/${b.dataset.undo}`); loadHistory(); }));
 }
 
 // ---------- settings ----------
@@ -787,10 +774,8 @@ $("#settings-form").addEventListener("submit", async (e) => {
     plan_mode: $("#set-mode").value,
     plan_count: String(Math.max(1, +$("#set-count").value || 5)),
   });
-  toast("Settings saved");
+  toast("Saved");
 });
-
-// ---------- boot ----------
 
 // ---------- theme, status, boot ----------
 
@@ -800,7 +785,7 @@ function applyTheme(t) {
   else document.documentElement.dataset.theme = t;
   const btn = $("#theme-btn");
   btn.innerHTML = ic({ system: "system", light: "sun", dark: "moon" }[t]);
-  btn.setAttribute("aria-label", `Theme: ${t}. Switch theme`);
+  btn.setAttribute("aria-label", `Theme: ${t}`);
   btn.title = `Theme: ${t}`;
 }
 let theme = "system";
@@ -815,9 +800,8 @@ $("#theme-btn").addEventListener("click", () => {
 
 async function loadStatus() {
   const s = await api("GET", "/api/status");
-  $("#footer-version").textContent = `v${s.version}`;
   $("#about-version").textContent = s.version;
-  $("#about-ai").innerHTML = s.ai_configured ? `Connected <span class="muted">· ${esc(s.model)}</span>` : "Not configured (set ANTHROPIC_API_KEY)";
+  $("#about-ai").innerHTML = s.ai_configured ? `Connected <span class="muted">· ${esc(s.model)}</span>` : `Not connected. Set <code>ANTHROPIC_API_KEY</code> and restart.`;
   let dismissed = false;
   try { dismissed = localStorage.getItem("hk-banner-dismissed") === "1"; } catch {}
   $("#setup-banner").hidden = s.ai_configured || dismissed;
@@ -827,8 +811,8 @@ $("#banner-close").addEventListener("click", () => {
   try { localStorage.setItem("hk-banner-dismissed", "1"); } catch {}
 });
 
-$("#today-label").textContent = (AS_OF ? "Previewing " : "") + fmtDate(todayISO());
+$("#today-label").textContent = (AS_OF ? "Previewing " : "") + fmtDate(todayISO(), false);
 loadStatus();
 refreshBadge();
 const startTab = location.hash.slice(1);
-showTab(["plan", "inventory", "documents", "tasks", "history", "settings"].includes(startTab) ? startTab : "plan");
+showTab(LOADERS[startTab] ? startTab : "plan");

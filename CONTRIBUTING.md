@@ -25,6 +25,7 @@ docker compose up --build
 - **Match the code around you.** The frontend is plain JS in `static/app.js`. Colors are CSS variables at the top of `static/style.css`, with a value for each theme, light and dark.
 - **Test scheduler and document changes.** `tests/test_scheduler.py` covers due dates and plans. `tests/test_documents.py` mocks Claude and the network.
 - **Never send personal data anywhere new.** The only outside service the app talks to is the Anthropic API, plus the public URLs a user asks it to download.
+- **Keep the UI quiet.** Use rows in a list rather than cards, status as colored text rather than badges, and icons only where they replace a label. Animations use the easing variables in `style.css`, stay under 300 ms, and exits are faster than entrances. Hover effects go inside `@media (hover: hover) and (pointer: fine)`. Nothing animates on tab switches.
 - **Check the UI at phone width** (about 390px) and in both themes.
 
 ## Pull requests

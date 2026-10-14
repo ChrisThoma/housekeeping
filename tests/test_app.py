@@ -35,7 +35,7 @@ def test_health_and_status(client, monkeypatch):
 def test_frontend_is_served(client):
     page = client.get("/")
     assert page.status_code == 200 and "Housekeeping" in page.text
-    for path in ("/static/app.js", "/static/style.css", "/static/fonts/fonts.css", "/static/favicon.svg", "/static/manifest.webmanifest"):
+    for path in ("/static/app.js", "/static/style.css", "/static/favicon.svg", "/static/manifest.webmanifest"):
         assert client.get(path).status_code == 200, path
 
 

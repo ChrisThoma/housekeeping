@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Housekeeping</title>
 <meta name="description" content="Home maintenance planner: your appliances, yard and cars, turned into a short list of what to do this week.">
-<meta name="theme-color" content="#2b4c7e">
+<meta name="theme-color" content="#f7f7f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.webmanifest">
-<link rel="stylesheet" href="/static/fonts/fonts.css">
 <link rel="stylesheet" href="/static/style.css">
 <script>
   // Apply the saved theme before first paint.
@@ -19,31 +19,18 @@
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
-    <symbol id="i-plan" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></symbol>
-    <symbol id="i-inventory" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
-    <symbol id="i-documents" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8M16 17H8M10 9H8"/></symbol>
-    <symbol id="i-tasks" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></symbol>
-    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
-    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/></symbol>
-    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
-    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
-    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
-    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></symbol>
-    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
-    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
-    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3.5 13.9 9l5.6 1.9-5.6 1.9L12 18.3l-1.9-5.5-5.6-1.9L10.1 9Z"/><path d="M19 2.5v4M17 4.5h4"/></symbol>
-    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
-    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
-    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
-    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></symbol>
-    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
-    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5Z"/></symbol>
-    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
-    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
-    <symbol id="i-system" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
-    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
-    <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
-    <symbol id="i-logo" viewBox="0 0 32 32"><path d="M6.5 14.5 16 7l9.5 7.5V24a1.5 1.5 0 0 1-1.5 1.5H8A1.5 1.5 0 0 1 6.5 24Z"/><path d="m11.5 17.5 3 3 6-6.5"/></symbol>
+    <symbol id="i-plan" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
+    <symbol id="i-inventory" viewBox="0 0 24 24"><path d="M3.5 10.5 12 4l8.5 6.5V19a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1Z"/><path d="M9.5 20v-5.5h5V20"/></symbol>
+    <symbol id="i-documents" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></symbol>
+    <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M16.5 4.5a2.1 2.1 0 0 1 3 3L8 19l-4 1 1-4Z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5Z"/></symbol>
+    <symbol id="i-system" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17Z" fill="currentColor" stroke="none"/></symbol>
   </defs>
 </svg>
 
@@ -51,138 +38,122 @@
 
 <header class="masthead">
   <div class="wrap masthead-row">
-    <a class="brand" href="#plan" data-goto="plan" aria-label="Housekeeping, go to plan">
-      <span class="logo"><svg class="i"><use href="#i-logo"/></svg></span>
-      <span class="brand-text">
-        <span class="brand-name">Housekeeping</span>
-        <span class="brand-sub" id="today-label"></span>
-      </span>
+    <a class="brand" href="#plan" data-goto="plan">
+      <span class="brand-name">Housekeeping</span>
+      <span class="brand-sub" id="today-label"></span>
     </a>
     <nav class="tabs" role="tablist" aria-label="Sections">
-      <button role="tab" data-tab="plan" aria-selected="true"><svg class="i"><use href="#i-plan"/></svg><span>Plan</span></button>
-      <button role="tab" data-tab="inventory"><svg class="i"><use href="#i-inventory"/></svg><span>Inventory</span></button>
-      <button role="tab" data-tab="documents"><svg class="i"><use href="#i-documents"/></svg><span>Documents</span></button>
-      <button role="tab" data-tab="tasks"><svg class="i"><use href="#i-tasks"/></svg><span>Tasks</span><span class="badge" id="suggested-badge" hidden></span></button>
-      <button role="tab" data-tab="history"><svg class="i"><use href="#i-history"/></svg><span>History</span></button>
-      <button role="tab" data-tab="settings"><svg class="i"><use href="#i-settings"/></svg><span>Settings</span></button>
+      <button role="tab" data-tab="plan" aria-selected="true"><svg class="i" aria-hidden="true"><use href="#i-plan"/></svg><span>Plan</span></button>
+      <button role="tab" data-tab="inventory"><svg class="i" aria-hidden="true"><use href="#i-inventory"/></svg><span>Home</span></button>
+      <button role="tab" data-tab="documents"><svg class="i" aria-hidden="true"><use href="#i-documents"/></svg><span>Manuals</span></button>
+      <button role="tab" data-tab="tasks"><svg class="i" aria-hidden="true"><use href="#i-tasks"/></svg><span>Tasks</span><span class="badge" id="suggested-badge" hidden></span></button>
+      <button role="tab" data-tab="history"><svg class="i" aria-hidden="true"><use href="#i-history"/></svg><span>History</span></button>
+      <button role="tab" data-tab="settings"><svg class="i" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
     </nav>
-    <button class="icon-btn theme-btn" id="theme-btn" type="button" aria-label="Theme: system"><svg class="i"><use href="#i-system"/></svg></button>
+    <button class="icon-btn" id="theme-btn" type="button" aria-label="Theme"><svg class="i"><use href="#i-system"/></svg></button>
   </div>
 </header>
 
-<div class="wrap banner-wrap" id="setup-banner" hidden>
-  <div class="banner" role="note">
-    <svg class="i"><use href="#i-alert"/></svg>
-    <div>
-      <strong>Claude isn't connected yet.</strong>
-      Planning, logging and your inventory work as they are. To get task suggestions, find manuals and read documents, set <code>ANTHROPIC_API_KEY</code> (in <code>.env</code> with Docker) and restart.
-    </div>
-    <button class="icon-btn" id="banner-close" type="button" aria-label="Dismiss"><svg class="i"><use href="#i-x"/></svg></button>
-  </div>
-</div>
-
 <main class="wrap" id="main">
+  <div class="notice" id="setup-banner" role="note" hidden>
+    <span class="dot due"></span>
+    <span><strong>Claude isn't connected.</strong> Suggestions and manual reading need an <code>ANTHROPIC_API_KEY</code>. Everything else works.</span>
+    <button id="banner-close" type="button">Dismiss</button>
+  </div>
+
   <!-- PLAN -->
   <section id="tab-plan" class="tab" aria-labelledby="plan-title">
-    <div class="section-head">
+    <div class="page-head">
       <div>
-        <p class="eyebrow" id="plan-eyebrow">This week</p>
-        <h1 id="plan-title">Maintenance sheet</h1>
+        <h1 id="plan-title">This week</h1>
+        <p class="page-sub" id="plan-sub"></p>
       </div>
       <div class="actions no-print">
-        <button class="btn ghost" id="plan-more"><svg class="i"><use href="#i-plus"/></svg>Add one more</button>
-        <button class="btn ghost" id="plan-regen"><svg class="i"><use href="#i-refresh"/></svg>Rebuild plan</button>
+        <button class="btn quiet small" id="plan-more">Add one more</button>
+        <button class="btn quiet small" id="plan-regen">Rebuild</button>
       </div>
     </div>
-    <div class="plan-stats no-print" id="plan-stats" hidden>
-      <span id="plan-stat-done"></span>
-      <span id="plan-stat-time"></span>
-    </div>
-    <div class="progress no-print" role="progressbar" aria-label="Plan progress" id="plan-progress-wrap"><div class="progress-bar" id="plan-progress"></div></div>
-    <ol class="plan-list" id="plan-list"></ol>
+    <div class="progress no-print" id="plan-progress-wrap" aria-hidden="true"><div class="progress-bar" id="plan-progress"></div></div>
+    <ol class="list" id="plan-list"></ol>
     <div id="plan-empty" hidden></div>
-    <div class="up-next no-print" id="up-next-wrap" hidden>
-      <h2 class="group-title">Also due <span class="muted" id="backlog-count"></span></h2>
-      <ul id="up-next" class="compact-list"></ul>
+    <div class="no-print" id="up-next-wrap" hidden>
+      <h2 class="section-title">Also due <span class="count" id="backlog-count"></span></h2>
+      <ul id="up-next" class="list"></ul>
     </div>
   </section>
 
   <!-- INVENTORY -->
   <section id="tab-inventory" class="tab" hidden>
-    <div class="section-head">
+    <div class="page-head">
       <div>
-        <p class="eyebrow">What you own</p>
-        <h1>Inventory</h1>
+        <h1>Home</h1>
+        <p class="page-sub">Everything that needs looking after.</p>
       </div>
-      <div class="actions"><button class="btn" id="asset-new"><svg class="i"><use href="#i-plus"/></svg>Add item</button></div>
+      <div class="actions"><button class="btn small" id="asset-new">Add item</button></div>
     </div>
     <div id="inventory-list"></div>
   </section>
 
   <!-- DOCUMENTS -->
   <section id="tab-documents" class="tab" hidden>
-    <div class="section-head">
+    <div class="page-head">
       <div>
-        <p class="eyebrow">Manuals &amp; guides</p>
-        <h1>Documents</h1>
+        <h1>Manuals</h1>
+        <p class="page-sub">Read once, then used for every suggestion.</p>
       </div>
       <div class="actions">
-        <button class="btn ghost" id="link-open"><svg class="i"><use href="#i-link"/></svg>Add from link</button>
-        <button class="btn" id="upload-open"><svg class="i"><use href="#i-upload"/></svg>Upload</button>
+        <button class="btn secondary small" id="link-open">Add link</button>
+        <button class="btn small" id="upload-open">Upload</button>
       </div>
     </div>
-    <p class="hint">Claude reads each document once and keeps notes on its maintenance schedule, part numbers and filter sizes. Task suggestions for an item use these notes. To have Claude look up an item's manuals online, use <strong>Find manuals</strong> under Inventory.</p>
     <div id="documents-list"></div>
   </section>
 
   <!-- TASKS -->
   <section id="tab-tasks" class="tab" hidden>
-    <div class="section-head">
+    <div class="page-head">
       <div>
-        <p class="eyebrow">Recurring rules</p>
         <h1>Tasks</h1>
+        <p class="page-sub">The recurring jobs your plan is built from.</p>
       </div>
       <div class="actions">
-        <button class="btn ghost" id="guide-open"><svg class="i"><use href="#i-sparkle"/></svg>Import my guide</button>
-        <button class="btn" id="task-new"><svg class="i"><use href="#i-plus"/></svg>Add task</button>
+        <button class="btn secondary small" id="guide-open">Import a checklist</button>
+        <button class="btn small" id="task-new">Add task</button>
       </div>
     </div>
 
     <div id="suggested-wrap" hidden>
-      <h2 class="group-title first">Waiting for your review <span class="muted" id="suggested-count"></span></h2>
-      <p class="hint">Approve the ones you want. If you know when you last did it, enter the date so it isn't scheduled right away.</p>
-      <div id="suggested-list" class="card-list"></div>
+      <h2 class="section-title">To review <span class="count" id="suggested-count"></span></h2>
+      <ul id="suggested-list" class="list"></ul>
+      <div class="list-foot" id="approve-all-wrap"></div>
     </div>
-    <h2 class="group-title" id="active-title">Active</h2>
-    <div class="table-wrap"><table class="task-table" id="task-table"></table></div>
+    <h2 class="section-title" id="active-title">Active</h2>
+    <ul class="list" id="task-list"></ul>
     <div id="paused-wrap" hidden>
-      <h2 class="group-title">Paused</h2>
-      <div class="table-wrap"><table class="task-table" id="paused-table"></table></div>
+      <h2 class="section-title">Paused</h2>
+      <ul class="list" id="paused-list"></ul>
     </div>
   </section>
 
   <!-- HISTORY -->
   <section id="tab-history" class="tab" hidden>
-    <div class="section-head">
+    <div class="page-head">
       <div>
-        <p class="eyebrow">Logbook</p>
         <h1>History</h1>
+        <p class="page-sub">Everything you've done, newest first.</p>
       </div>
     </div>
-    <div class="table-wrap"><table class="task-table" id="history-table"></table></div>
+    <ul class="list" id="history-list"></ul>
   </section>
 
   <!-- SETTINGS -->
   <section id="tab-settings" class="tab" hidden>
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">Your home</p>
-        <h1>Settings</h1>
-      </div>
+    <div class="page-head">
+      <div><h1>Settings</h1></div>
     </div>
-    <form id="settings-form" class="panel form-grid">
+    <form id="settings-form" class="card form-grid">
       <label class="span2">Location <input id="set-location" placeholder="Pittsburgh, PA" autocomplete="address-level2"></label>
-      <label class="span2">Climate notes <input id="set-climate" placeholder="USDA zone 6b, snowy winters, first frost mid-October"></label>
+      <label class="span2">Climate <input id="set-climate" placeholder="Zone 6b, snowy winters, first frost mid-October"></label>
       <label>Hemisphere
         <select id="set-hemisphere"><option value="north">Northern</option><option value="south">Southern</option></select>
       </label>
@@ -190,59 +161,53 @@
       <label>Plan by
         <select id="set-mode"><option value="weekly">Week</option><option value="daily">Day</option></select>
       </label>
-      <label>Tasks per plan <input id="set-count" type="number" min="1" max="50"></label>
-      <p class="span2 hint">Location and climate shape which months Claude picks for seasonal work. Changing plan size takes effect the next time a plan is made, or right away if you rebuild the plan.</p>
-      <div class="span2 form-actions"><button type="submit" class="btn"><svg class="i"><use href="#i-check"/></svg>Save settings</button></div>
+      <label>Tasks per plan <input id="set-count" type="number" min="1" max="50" inputmode="numeric"></label>
+      <p class="span2 hint">Location and climate decide which months seasonal work lands in. A new plan size applies from the next plan, or now if you rebuild.</p>
+      <div class="span2 form-actions"><button type="submit" class="btn">Save</button></div>
     </form>
-    <dl class="about panel" id="about">
-      <div><dt>Version</dt><dd class="mono" id="about-version">—</dd></div>
-      <div><dt>Claude</dt><dd id="about-ai">—</dd></div>
-      <div><dt>API</dt><dd><a href="/docs" target="_blank" rel="noopener">Interactive reference</a></dd></div>
+    <dl class="list about">
+      <div class="row"><dt>Version</dt><dd id="about-version">—</dd></div>
+      <div class="row"><dt>Claude</dt><dd id="about-ai">—</dd></div>
+      <div class="row"><dt>API</dt><dd><a href="/docs" target="_blank" rel="noopener">Reference</a></dd></div>
     </dl>
   </section>
 </main>
 
-<footer class="wrap site-footer">
-  <span>Housekeeping <span class="mono" id="footer-version"></span></span>
-  <span>Open source under the MIT License</span>
-  <a href="/docs" target="_blank" rel="noopener">API</a>
-</footer>
-
 <!-- Dialogs -->
 <dialog class="modal" id="asset-dialog" aria-labelledby="asset-dialog-title">
   <form id="asset-form" class="modal-body">
-    <header class="modal-head"><h2 id="asset-dialog-title">Add item</h2><button type="button" class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></header>
+    <h2 id="asset-dialog-title">Add item</h2>
     <div class="form-grid">
       <input type="hidden" id="asset-id">
-      <label>Category
+      <label>Kind
         <select id="asset-category">
           <option value="appliance">Appliance</option>
           <option value="home">Home system</option>
-          <option value="outdoor">Outdoor feature</option>
-          <option value="plant">Plant / lawn</option>
+          <option value="outdoor">Outdoor</option>
+          <option value="plant">Plant or lawn</option>
           <option value="vehicle">Vehicle</option>
         </select>
       </label>
       <label>Name <input id="asset-name" required placeholder="Furnace"></label>
-      <label class="span2">Details <input id="asset-details" placeholder="Brand, model, species, where it is"></label>
-      <label>Year <input id="asset-year" type="number" min="1900" max="2100" placeholder="2019"></label>
-      <label id="asset-mileage-wrap">Odometer (mi) <input id="asset-mileage" type="number" min="0" placeholder="48200"></label>
+      <label class="span2">Make and model <input id="asset-details" placeholder="Carrier 59SC5, or species and location"></label>
+      <label>Year <input id="asset-year" type="number" min="1900" max="2100" inputmode="numeric" placeholder="2019"></label>
+      <label id="asset-mileage-wrap">Odometer (mi) <input id="asset-mileage" type="number" min="0" inputmode="numeric" placeholder="48200"></label>
       <label class="span2">Notes <input id="asset-notes" placeholder="Anything that changes the care it needs"></label>
     </div>
-    <footer class="form-actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
+    <div class="form-actions">
+      <button type="button" class="btn quiet" data-close>Cancel</button>
       <button type="submit" class="btn">Save</button>
-    </footer>
+    </div>
   </form>
 </dialog>
 
 <dialog class="modal" id="upload-dialog" aria-labelledby="upload-dialog-title">
   <form id="upload-form" class="modal-body">
-    <header class="modal-head"><h2 id="upload-dialog-title">Upload a document</h2><button type="button" class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></header>
+    <h2 id="upload-dialog-title">Upload a manual</h2>
     <div class="form-grid">
       <label class="span2 dropzone">
-        <span class="dropzone-label"><svg class="i"><use href="#i-upload"/></svg><span id="upload-file-name">Choose a PDF, photo or text file</span></span>
-        <input type="file" id="upload-file" autofocus required accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.html,.htm,application/pdf,image/*,text/*">
+        <span id="upload-file-name">Choose a PDF, photo or text file</span>
+        <input type="file" id="upload-file" required accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.html,.htm,application/pdf,image/*,text/*">
       </label>
       <label>For <select id="upload-asset" class="asset-select"></select></label>
       <label>Type
@@ -250,79 +215,81 @@
           <option value="manual">Owner's manual</option>
           <option value="maintenance">Maintenance schedule</option>
           <option value="guide">Guide or checklist</option>
-          <option value="photo">Photo (data plate, label)</option>
+          <option value="photo">Photo of a label</option>
           <option value="other">Other</option>
         </select>
       </label>
-      <label class="span2">Title (optional) <input id="upload-title" placeholder="Uses the file name if left blank"></label>
+      <label class="span2">Title <input id="upload-title" placeholder="Optional. Uses the file name."></label>
     </div>
-    <footer class="form-actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
-      <button type="submit" class="btn" id="upload-submit">Upload and read</button>
-    </footer>
+    <div class="form-actions">
+      <button type="button" class="btn quiet" data-close>Cancel</button>
+      <button type="submit" class="btn" id="upload-submit">Upload</button>
+    </div>
   </form>
 </dialog>
 
 <dialog class="modal" id="link-dialog" aria-labelledby="link-dialog-title">
   <form id="link-form" class="modal-body">
-    <header class="modal-head"><h2 id="link-dialog-title">Add from a link</h2><button type="button" class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></header>
+    <h2 id="link-dialog-title">Add from a link</h2>
     <div class="form-grid">
-      <label class="span2">Link to a PDF or web page <input id="link-url" type="url" required placeholder="https://www.example.com/manuals/model-123.pdf"></label>
+      <label class="span2">PDF or web page <input id="link-url" type="url" required placeholder="https://example.com/manual.pdf"></label>
       <label>For <select id="link-asset" class="asset-select"></select></label>
-      <label>Title (optional) <input id="link-title"></label>
+      <label>Title <input id="link-title" placeholder="Optional"></label>
     </div>
-    <footer class="form-actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
-      <button type="submit" class="btn" id="link-submit">Download and read</button>
-    </footer>
+    <div class="form-actions">
+      <button type="button" class="btn quiet" data-close>Cancel</button>
+      <button type="submit" class="btn" id="link-submit">Add</button>
+    </div>
   </form>
 </dialog>
 
 <dialog class="modal" id="guide-dialog" aria-labelledby="guide-dialog-title">
   <form id="guide-form" class="modal-body">
-    <header class="modal-head"><h2 id="guide-dialog-title">Import my guide</h2><button type="button" class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></header>
-    <p class="hint">Paste your home maintenance guide or checklist, or upload it as a PDF or photo. Claude turns each recurring item into a task for you to review.</p>
-    <textarea id="guide-text" rows="9" aria-label="Guide text" placeholder="Monthly: test GFCI outlets, clean range hood filter&#10;Every fall: clean gutters, drain hoses, service furnace&#10;Weekly: wipe down kitchen, take out recycling..."></textarea>
+    <div>
+      <h2 id="guide-dialog-title">Import a checklist</h2>
+      <p class="hint" style="margin-top:4px">Each recurring item becomes a task for you to review.</p>
+    </div>
+    <textarea id="guide-text" rows="8" aria-label="Checklist" placeholder="Monthly: test GFCI outlets&#10;Every fall: clean gutters, service furnace&#10;Weekly: take out recycling"></textarea>
     <label class="dropzone compact">
-      <span class="dropzone-label"><svg class="i"><use href="#i-upload"/></svg><span id="guide-file-name">Or upload a PDF or photo</span></span>
+      <span id="guide-file-name">Or choose a PDF or photo</span>
       <input type="file" id="guide-file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,application/pdf,image/*,text/*">
     </label>
-    <footer class="form-actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
-      <button type="submit" class="btn" id="guide-submit"><svg class="i"><use href="#i-sparkle"/></svg>Turn into tasks</button>
-    </footer>
+    <div class="form-actions">
+      <button type="button" class="btn quiet" data-close>Cancel</button>
+      <button type="submit" class="btn" id="guide-submit">Import</button>
+    </div>
   </form>
 </dialog>
 
 <dialog class="modal" id="task-dialog" aria-labelledby="task-dialog-title">
   <form id="task-form" class="modal-body">
-    <header class="modal-head"><h2 id="task-dialog-title">Add task</h2><button type="button" class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></header>
+    <h2 id="task-dialog-title">Add task</h2>
     <div class="form-grid">
       <input type="hidden" id="task-id">
       <input type="hidden" id="task-status">
       <input type="hidden" id="task-source">
       <label class="span2">Title <input id="task-title" required placeholder="Replace HVAC filter"></label>
-      <label class="span2">How / why <input id="task-description"></label>
+      <label class="span2">Notes <input id="task-description" placeholder="How, or why it matters"></label>
       <label>For <select id="task-asset"></select></label>
       <label>Repeats
         <select id="task-recurrence">
-          <option value="interval">Every N days</option>
-          <option value="seasonal">Once a year, in certain months</option>
-          <option value="mileage">Every N miles</option>
+          <option value="interval">Every few days</option>
+          <option value="seasonal">Yearly, in certain months</option>
+          <option value="mileage">By mileage</option>
         </select>
       </label>
-      <label data-rec="interval mileage">Every (days) <input id="task-interval" type="number" min="1" placeholder="90"></label>
+      <label data-rec="interval mileage">Every (days) <input id="task-interval" type="number" min="1" inputmode="numeric" placeholder="90"></label>
       <label data-rec="seasonal">Months <input id="task-months" placeholder="10,11"></label>
-      <label data-rec="mileage">Every (miles) <input id="task-mileage" type="number" min="1" placeholder="5000"></label>
+      <label data-rec="mileage">Every (miles) <input id="task-mileage" type="number" min="1" inputmode="numeric" placeholder="5000"></label>
       <label>Priority
         <select id="task-priority"><option value="1">High</option><option value="2" selected>Normal</option><option value="3">Low</option></select>
       </label>
-      <label>Minutes <input id="task-minutes" type="number" min="1" placeholder="15"></label>
+      <label>Minutes <input id="task-minutes" type="number" min="1" inputmode="numeric" placeholder="15"></label>
     </div>
-    <footer class="form-actions">
-      <button type="button" class="btn ghost" data-close>Cancel</button>
+    <div class="form-actions">
+      <button type="button" class="btn quiet" data-close>Cancel</button>
       <button type="submit" class="btn">Save</button>
-    </footer>
+    </div>
   </form>
 </dialog>
 

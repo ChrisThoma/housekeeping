@@ -20,14 +20,14 @@
 - **Three kinds of schedule.** Every N days (furnace filter, 90 days), seasonal windows (clean gutters, Oct–Nov), and every N miles with a time cap (oil change, 5,000 mi or 6 months).
 - **Suggestions from Claude, approved by you.** Claude proposes a schedule for each item based on its make, model, year and your climate. Nothing reaches your plan until you approve it.
 - **Reads the manuals.** *Find manuals* searches the web for an item's owner's manual and downloads it. You can also upload PDFs or photos of a data plate, or paste a link. Claude notes the maintenance intervals with page numbers, part numbers and filter sizes, and suggestions follow the manufacturer's intervals.
-- **Imports your own checklist.** Paste it, or upload a PDF or photo, and each recurring item becomes a task.
+- **Imports your own checklist.** Under **Tasks → Import a checklist**, paste it, or upload a PDF or photo, and each recurring item becomes a task.
 - **A logbook.** Every completion is recorded with the date, odometer reading and notes.
-- **Self-hosted and private.** One container and a SQLite file. No account and no telemetry. Fonts are bundled, so the app makes no third-party requests except to the Anthropic API.
+- **Self-hosted and private.** One container and a SQLite file. No account and no telemetry. It uses your system font and makes no third-party requests except to the Anthropic API.
 - **Works on a phone.** Responsive layout with a bottom tab bar, light and dark themes, and it can be installed to your home screen.
 
 <table>
 <tr>
-<td width="68%"><img src="docs/screenshot-dark.png" alt="Documents tab in dark mode, showing the notes Claude took from a furnace manual"></td>
+<td width="68%"><img src="docs/screenshot-dark.png" alt="Manuals tab in dark mode, showing the notes taken from a furnace manual"></td>
 <td width="32%"><img src="docs/screenshot-mobile.png" alt="The weekly plan on a phone"></td>
 </tr>
 </table>
@@ -122,7 +122,7 @@ app/
   ai.py          Claude calls: suggestions, guide import, reading and finding documents
   documents.py   safe downloads, PDF/HTML text extraction, file storage
   db.py          SQLite schema and settings
-static/          the web app (index.html, app.js, style.css, bundled fonts)
+static/          the web app (index.html, app.js, style.css)
 tests/
 ```
 
@@ -132,4 +132,4 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE). Bundled fonts (Bricolage Grotesque, Public Sans, IBM Plex Mono) are under the SIL Open Font License 1.1.
+[MIT](LICENSE).
