@@ -1,0 +1,14 @@
+{
+  "name": "Housekeeping",
+  "short_name": "Housekeeping",
+  "description": "Home maintenance planner: your appliances, yard and cars, turned into a short list of what to do this week.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f2f4f1",
+  "theme_color": "#2b4c7e",
+  "icons": [
+    { "src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

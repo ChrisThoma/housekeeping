@@ -1,0 +1,16 @@
+services:
+  housekeeping:
+    build: .
+    image: housekeeping:latest
+    container_name: housekeeping
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - housekeeping-data:/data
+
+volumes:
+  housekeeping-data:
