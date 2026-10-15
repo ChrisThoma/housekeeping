@@ -21,6 +21,10 @@ from . import db
 log = logging.getLogger("uvicorn.error")
 
 COOKIE = "hk_session"
+# Marks a browser that has signed in before. Kept after signing out (not after "Sign out everywhere"), so that
+# browser can still sign in while strangers are locked out for guessing; see main._attempt_keys.
+DEVICE_COOKIE = "hk_device"
+DEVICE_SECONDS = 400 * 24 * 3600  # the longest browsers keep a cookie
 REMEMBER_SECONDS = 90 * 24 * 3600   # "Keep me signed in": 90 days, extended as you use the app
 SHORT_SECONDS = 12 * 3600           # otherwise: until the browser closes, or 12 hours without using the app
 MAX_AGE = 365 * 24 * 3600           # no session outlives this, however much it's used; then you sign in again
@@ -70,28 +74,32 @@ def rotate():
         _keys[path] = _write_key(path)
 
 
-def _signature(username: str, password: str, body: str) -> str:
-    key = hmac.new(_secret(), f"v2\0{username}\0{password}".encode(), hashlib.sha256).digest()
+def _signature(username: str, password: str, body: str, purpose: str = "session") -> str:
+    # Separate keys per purpose, so a device mark can never be used as a session or the other way round.
+    material = f"v2\0{username}\0{password}" if purpose == "session" else f"v2-{purpose}\0{username}"
+    key = hmac.new(_secret(), material.encode(), hashlib.sha256).digest()
     return hmac.new(key, body.encode(), hashlib.sha256).hexdigest()
 
 
-def issue(username: str, password: str, seconds: int, first: int | None = None, now: float | None = None) -> str:
+def issue(username: str, password: str, seconds: int, first: int | None = None, now: float | None = None,
+          purpose: str = "session") -> str:
     issued = int(now if now is not None else time.time())
     body = f"{first if first is not None else issued}.{issued}.{issued + seconds}"
-    return f"{body}.{_signature(username, password, body)}"
+    return f"{body}.{_signature(username, password, body, purpose)}"
 
 
-def check(token: str, username: str, password: str, now: float | None = None) -> tuple[int, int, int] | None:
+def check(token: str, username: str, password: str, now: float | None = None,
+          purpose: str = "session") -> tuple[int, int, int] | None:
     """Return (first, issued, expires) for a valid, current token; None otherwise."""
     m = _TOKEN.fullmatch(token)
     if not m:
         return None
     first, issued, expires = (int(g) for g in m.groups()[:3])
-    expected = _signature(username, password, f"{first}.{issued}.{expires}")
+    expected = _signature(username, password, f"{first}.{issued}.{expires}", purpose)
     if not hmac.compare_digest(m.group(4).encode(), expected.encode()):
         return None
     now = now if now is not None else time.time()
-    if expires <= now or now - first > MAX_AGE:
+    if expires <= now or (purpose == "session" and now - first > MAX_AGE):
         return None
     return first, issued, expires
 

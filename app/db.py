@@ -82,6 +82,9 @@ MIGRATIONS = [
     "ALTER TABLE completions ADD COLUMN prev_asset_mileage INTEGER",
     # 2: one-off tasks (recurrence 'once') can have a deadline.
     "ALTER TABLE tasks ADD COLUMN due_date TEXT",
+    # 3: which item a completion was for, so moving a task to another car can't mix up their odometers.
+    ("ALTER TABLE completions ADD COLUMN asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL",
+     "UPDATE completions SET asset_id = (SELECT asset_id FROM tasks WHERE tasks.id = completions.task_id)"),
 ]
 
 DEFAULT_SETTINGS = {
@@ -90,6 +93,7 @@ DEFAULT_SETTINGS = {
     "hemisphere": "north",
     "plan_mode": "weekly",     # daily | weekly
     "plan_count": "5",
+    "timezone": "",            # IANA name, e.g. "America/New_York"; set from your browser the first time you open the app
 }
 
 
@@ -119,8 +123,9 @@ def init():
     with connect() as conn:
         conn.executescript(SCHEMA)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        for i, statement in enumerate(MIGRATIONS[version:], version + 1):
-            conn.execute(statement)
+        for i, migration in enumerate(MIGRATIONS[version:], version + 1):
+            for statement in (migration,) if isinstance(migration, str) else migration:
+                conn.execute(statement)
             conn.execute(f"PRAGMA user_version = {i}")
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))

@@ -9,15 +9,17 @@ import threading
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anthropic
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, ValidationError
 
 from . import __version__, ai, auth, db, documents, scheduler
@@ -35,9 +37,12 @@ ALLOWED_HOSTS = [h.strip().lower() for h in os.environ.get("HOUSEKEEPING_ALLOWED
 LOCAL_SUFFIXES = (".localhost", ".local", ".lan", ".home", ".home.arpa", ".internal")
 MAX_REQUEST_BYTES = documents.MAX_BYTES + 4 * 1024 * 1024  # the largest upload plus form overhead
 AUTH_FAILURE_DELAY = 1.0  # seconds before answering a wrong password
-# At most this many wrong passwords per window, across everyone. Past that, every sign-in attempt is refused,
-# right or wrong, until the window has passed, so an attacker can't learn anything by guessing faster.
-FAILURE_LIMIT, FAILURE_WINDOW = 10, 60
+# Wrong passwords allowed per window before sign-in is refused, right or wrong, for the rest of the window,
+# so guessing faster gains nothing. Counted per network address, per browser that has signed in before, and
+# for everyone else together (addresses can be faked through X-Forwarded-For, so that total is the backstop).
+# A browser that has signed in before only counts against its own limit, so strangers guessing can't lock you out.
+FAILURE_WINDOW = 600
+FAILURE_LIMITS = {"address": 5, "device": 10, "everyone": 50}
 # Mark the cookie Secure even when the app can't tell the page came over HTTPS (a proxy without X-Forwarded-Proto).
 SECURE_COOKIES = os.environ.get("HOUSEKEEPING_SECURE_COOKIES", "").lower() in ("1", "true", "yes")
 
@@ -80,20 +85,41 @@ def _cross_site(request: Request) -> bool:
     return urllib.parse.urlsplit(origin).netloc.lower() != host.lower()
 
 
-_failures: list[float] = []  # times of recent wrong passwords
+_failures: dict[str, list[float]] = {}  # "kind:id" -> times of recent wrong passwords
 
 
-def _locked_out() -> bool:
+def _client_address(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _attempt_keys(request: Request) -> list[str]:
+    """Which limits a sign-in attempt from this browser counts against."""
+    device = request.cookies.get(auth.DEVICE_COOKIE, "")
+    if device and auth.check(device, USERNAME, "", purpose="device"):
+        return [f"device:{device.rsplit('.', 1)[-1][:16]}"]
+    return [f"address:{_client_address(request)}", "everyone:*"]
+
+
+def _recent(key: str) -> int:
     cutoff = time.monotonic() - FAILURE_WINDOW
-    _failures[:] = [t for t in _failures if t > cutoff]
-    return len(_failures) >= FAILURE_LIMIT
+    times = [t for t in _failures.get(key, []) if t > cutoff]
+    if times:
+        _failures[key] = times
+    else:
+        _failures.pop(key, None)
+    return len(times)
 
 
-TOO_MANY = "Too many wrong passwords. Wait a minute and try again."
+def _locked_out(request: Request) -> bool:
+    return any(_recent(k) >= FAILURE_LIMITS[k.split(":", 1)[0]] for k in _attempt_keys(request))
 
 
-async def _wrong_password():
-    _failures.append(time.monotonic())
+TOO_MANY = "Too many wrong passwords. Wait a few minutes and try again."
+
+
+async def _wrong_password(request: Request):
+    for key in _attempt_keys(request):
+        _failures.setdefault(key, []).append(time.monotonic())
     await asyncio.sleep(AUTH_FAILURE_DELAY)
 
 
@@ -163,10 +189,10 @@ async def guard(request: Request, call_next):
         session = _session(request)
         if not session:
             basic = _basic_auth(request)
-            if basic is not None and _locked_out():
+            if basic is not None and _locked_out(request):
                 return Response(TOO_MANY, 429)
             if basic is False:
-                await _wrong_password()
+                await _wrong_password(request)
             if not basic:
                 page = not request.url.path.startswith("/api/") or request.headers.get("sec-fetch-mode") == "navigate"
                 if page:  # a person opening a page (or a manual in a new tab): send them to sign in
@@ -190,7 +216,17 @@ async def guard(request: Request, call_next):
     return response
 
 
-clock = date.today  # tests replace this to fix "today"
+def clock() -> date:
+    """Today where you live (the time zone in Settings), not where the server is: in Docker that's UTC, which
+    would roll the day over at the wrong hour. Tests replace this to fix "today"."""
+    with db.connect() as conn:
+        tz = db.get_settings(conn).get("timezone") or os.environ.get("HOUSEKEEPING_TIMEZONE", "")
+    if tz:
+        try:
+            return datetime.now(ZoneInfo(tz)).date()
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return date.today()  # the server's own time zone (honours TZ)
 
 
 def today(override: Optional[str] = None) -> date:
@@ -342,13 +378,17 @@ async def login(request: Request, username: str = Form(""), password: str = Form
     target = _safe_next(next)
     if not PASSWORD:
         return RedirectResponse(target, 303)
-    if _locked_out():  # checked before the password, so a right guess looks the same as a wrong one
+    if _locked_out(request):  # checked before the password, so a right guess looks the same as a wrong one
         return HTMLResponse(TOO_MANY, 429)
     if not _credentials_ok(username, password):
-        await _wrong_password()
+        await _wrong_password(request)
         return RedirectResponse(f"/login?error=1&next={urllib.parse.quote(target)}", 303)
     response = RedirectResponse(target, 303)
     _set_session(response, request, auth.REMEMBER_SECONDS if remember else auth.SHORT_SECONDS)
+    # Remember that this browser has signed in, so it keeps its own allowance if strangers start guessing.
+    response.set_cookie(auth.DEVICE_COOKIE, auth.issue(USERNAME, "", auth.DEVICE_SECONDS, purpose="device"),
+                        max_age=auth.DEVICE_SECONDS, httponly=True, samesite="lax",
+                        secure=SECURE_COOKIES or request.url.scheme == "https", path="/")
     return response
 
 
@@ -391,6 +431,11 @@ def write_settings(values: dict[str, str]):
             raise HTTPException(400, f"{k} must be one of: {', '.join(sorted(choices))}")
     if "plan_count" in values and not (values["plan_count"].isdigit() and 1 <= int(values["plan_count"]) <= 50):
         raise HTTPException(400, "plan_count must be a whole number from 1 to 50")
+    if values.get("timezone"):
+        try:
+            ZoneInfo(values["timezone"])
+        except (ZoneInfoNotFoundError, ValueError):
+            raise HTTPException(400, f"{values['timezone']!r} isn't a time zone. Use a name like America/New_York.")
     with db.connect() as conn:
         for k, v in values.items():
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -425,7 +470,12 @@ def create_asset(a: AssetIn):
 async def scan_asset(file: UploadFile = File(...)):
     """Read a photo of a label or the item itself and return the fields for a new item. Nothing is saved."""
     data = await file.read(documents.MAX_BYTES + 1)
-    mime = documents.sniff_mime(data, file.content_type or "")
+    # Claude takes seconds to answer; do that on a worker thread so other requests aren't held up meanwhile.
+    return await run_in_threadpool(_scan, data, file.content_type or "")
+
+
+def _scan(data: bytes, content_type: str) -> dict:
+    mime = documents.sniff_mime(data, content_type)
     if mime not in documents.IMAGE_TYPES:
         raise HTTPException(400, "Choose a photo (JPEG, PNG, WebP or GIF).")
     if (len(data) + 2) // 3 * 4 > 5 * 1024 * 1024:  # the API's 5 MB limit applies to the base64 encoding
@@ -460,10 +510,13 @@ def update_asset(asset_id: int, a: AssetIn):
 
 @app.delete("/api/assets/{asset_id}")
 def delete_asset(asset_id: int):
+    # Delete the rows first. Files go only once that's committed, so a failure part-way can't leave
+    # documents in the database whose files are already gone.
     with db.connect() as conn:
-        for d in conn.execute("SELECT * FROM documents WHERE asset_id = ?", (asset_id,)).fetchall():
-            _remove_document(dict(d))
+        docs = [dict(d) for d in conn.execute("SELECT * FROM documents WHERE asset_id = ?", (asset_id,))]
         conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+    for doc in docs:
+        _remove_document(doc)
     return {"ok": True}
 
 
@@ -521,7 +574,11 @@ def _get_doc(conn, doc_id: int) -> dict:
 
 
 def _remove_document(doc: dict):
-    documents.delete_file(doc)
+    """Best-effort cleanup after a document's row is gone: a file that can't be deleted is logged, not fatal."""
+    try:
+        documents.delete_file(doc)
+    except OSError as e:
+        log.warning("Couldn't delete %s: %s", doc.get("filename"), e)
     ai.forget_file(doc.get("anthropic_file_id"))
 
 
@@ -573,9 +630,16 @@ async def upload_document(file: UploadFile = File(...), asset_id: Optional[int] 
                           title: str = Form(""), kind: str = Form("manual"), read: bool = Form(True),
                           notes: str = Form("")):
     data = await file.read(documents.MAX_BYTES + 1)
+    # Storing, PDF parsing and Claude reading the file are slow and blocking; keep them off the event loop.
+    return await run_in_threadpool(_upload, data, file.filename or "upload", file.content_type or "",
+                                   asset_id, title, kind, read, notes)
+
+
+def _upload(data: bytes, filename: str, content_type: str, asset_id: Optional[int], title: str, kind: str,
+            read: bool, notes: str) -> dict:
     if len(data) > documents.MAX_BYTES:
         raise HTTPException(400, "That file is larger than 60 MB.")
-    mime = documents.sniff_mime(data, file.content_type or "")
+    mime = documents.sniff_mime(data, content_type)
     if mime is None:
         raise HTTPException(400, "Upload a PDF, an image (PNG, JPEG, WebP, GIF), a text file or a saved web page.")
     parsed = None
@@ -586,7 +650,7 @@ async def upload_document(file: UploadFile = File(...), asset_id: Optional[int] 
             raise HTTPException(400, "notes must match the document notes format")
     if mime.startswith("image/") and kind == "manual":
         kind = "photo"
-    doc_id = _store(data=data, mime=mime, filename=file.filename or "upload", title=title or Path(file.filename or "").stem,
+    doc_id = _store(data=data, mime=mime, filename=filename, title=title or Path(filename).stem,
                     asset_id=asset_id, kind=kind, source="uploaded")
     error = None
     if parsed:
@@ -772,6 +836,8 @@ def update_task(task_id: int, t: TaskIn):
 
 @app.post("/api/tasks/{task_id}/approve")
 def approve_task(task_id: int, body: ApproveIn):
+    if body.last_done_on and body.last_done_on > clock():
+        raise HTTPException(400, "The last time you did it can't be in the future.")
     with db.connect() as conn:
         task = dict(_require(conn, "tasks", task_id, "Task"))
         if task["status"] != "suggested":
@@ -782,8 +848,8 @@ def approve_task(task_id: int, body: ApproveIn):
             raise HTTPException(400, "This suggestion is missing its schedule. Edit it before approving.")
         conn.execute("UPDATE tasks SET status = 'active' WHERE id = ?", (task_id,))
         if body.last_done_on:
-            conn.execute("INSERT INTO completions (task_id, done_on, notes) VALUES (?, ?, 'Initial history')",
-                         (task_id, body.last_done_on.isoformat()))
+            conn.execute("INSERT INTO completions (task_id, done_on, notes, asset_id) VALUES (?, ?, 'Initial history', ?)",
+                         (task_id, body.last_done_on.isoformat(), task["asset_id"]))
     return {"ok": True}
 
 
@@ -824,6 +890,9 @@ def delete_task(task_id: int):
 
 @app.post("/api/completions")
 def complete(c: CompletionIn, as_of: Optional[str] = None):
+    # A day of slack, for a browser a time zone ahead of the server's idea of today.
+    if c.done_on and c.done_on > today(as_of) + timedelta(days=1):
+        raise HTTPException(400, "A completion can't be dated in the future.")
     done_on = (c.done_on or today(as_of)).isoformat()
     with db.connect() as conn:
         task = _require(conn, "tasks", c.task_id, "Task")
@@ -834,8 +903,9 @@ def complete(c: CompletionIn, as_of: Optional[str] = None):
             mileage = asset["mileage"]  # done now with no reading: count miles from the car's last known odometer
         elif c.mileage and vehicle and c.mileage > (asset["mileage"] or 0):
             prev = asset["mileage"] if asset["mileage"] is not None else -1  # -1: the car had no reading before
-        cur = conn.execute("INSERT INTO completions (task_id, done_on, mileage, notes, prev_asset_mileage) VALUES (?, ?, ?, ?, ?)",
-                           (c.task_id, done_on, mileage, c.notes, prev))
+        cur = conn.execute(
+            "INSERT INTO completions (task_id, done_on, mileage, notes, prev_asset_mileage, asset_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (c.task_id, done_on, mileage, c.notes, prev, task["asset_id"]))
         conn.execute("UPDATE tasks SET snoozed_until = NULL WHERE id = ?", (c.task_id,))
         # A mileage reading on a vehicle task also updates the vehicle's odometer.
         if prev is not None:
@@ -849,10 +919,10 @@ def undo_completion(completion_id: int):
         c = _require(conn, "completions", completion_id, "Completion")
         conn.execute("DELETE FROM completions WHERE id = ?", (completion_id,))
         # Put the odometer back if this completion moved it and nothing has changed it since.
-        if c["prev_asset_mileage"] is not None:
-            conn.execute(
-                "UPDATE assets SET mileage = ? WHERE id = (SELECT asset_id FROM tasks WHERE id = ?) AND mileage = ?",
-                (None if c["prev_asset_mileage"] < 0 else c["prev_asset_mileage"], c["task_id"], c["mileage"]))
+        # Uses the item the completion was for: the task may have been moved to another item since.
+        if c["prev_asset_mileage"] is not None and c["asset_id"] is not None:
+            conn.execute("UPDATE assets SET mileage = ? WHERE id = ? AND mileage = ?",
+                         (None if c["prev_asset_mileage"] < 0 else c["prev_asset_mileage"], c["asset_id"], c["mileage"]))
     return {"ok": True}
 
 

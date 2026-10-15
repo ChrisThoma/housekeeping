@@ -4,3 +4,4 @@ pydantic>=2.14,<3
 pypdf>=6.20,<7
 python-multipart>=0.0.32
 uvicorn[standard]>=0.54,<1
+tzdata>=2024.1  # time zones for zoneinfo where the OS has none (slim Docker images)

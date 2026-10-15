@@ -59,7 +59,7 @@ def test_oversized_uploads_are_refused_before_reading(client):
 def signed_out(client, monkeypatch):
     monkeypatch.setattr(main, "PASSWORD", "hunter2")
     monkeypatch.setattr(main, "AUTH_FAILURE_DELAY", 0)
-    monkeypatch.setattr(main, "_failures", [])
+    monkeypatch.setattr(main, "_failures", {})
     auth._keys.clear()
     return client
 
@@ -193,21 +193,63 @@ def test_sessions_are_renewed_with_use_but_not_forever(signed_out):
     assert cookies(r) and "Max-Age" not in cookies(r)[0]
 
 
-def test_guessing_is_capped_and_a_right_guess_looks_the_same(signed_out, monkeypatch):
-    client = signed_out
-    for _ in range(main.FAILURE_LIMIT):
+def guess(client, times):
+    for _ in range(times):
         client.post("/login", data={"username": "admin", "password": "guess"}, follow_redirects=False)
+
+
+def from_address(monkeypatch, address):
+    monkeypatch.setattr(main, "_client_address", lambda request: address)
+
+
+def test_guessing_is_capped_per_address_and_a_right_guess_looks_the_same(signed_out, monkeypatch):
+    client = signed_out
+    from_address(monkeypatch, "203.0.113.9")
+    guess(client, main.FAILURE_LIMITS["address"])
     r = sign_in(client)
     assert r.status_code == 429 and not cookies(r)  # even the right password is refused for now
     good = "Basic " + base64.b64encode(b"admin:hunter2").decode()
     assert client.get("/api/settings", headers={"Authorization": good}).status_code == 429
-    monkeypatch.setattr(main, "_failures", [])  # a minute later
+    from_address(monkeypatch, "198.51.100.4")  # someone else isn't affected
     assert sign_in(client).status_code == 303
+    monkeypatch.setattr(main, "_failures", {})  # the window passes
+    from_address(monkeypatch, "203.0.113.9")
+    client.cookies.clear()
+    assert sign_in(client).status_code == 303
+
+
+def test_guessing_from_many_addresses_hits_the_overall_cap(signed_out, monkeypatch):
+    for i in range(main.FAILURE_LIMITS["everyone"]):
+        from_address(monkeypatch, f"203.0.113.{i}")
+        guess(signed_out, 1)
+    from_address(monkeypatch, "198.51.100.4")
+    assert sign_in(signed_out).status_code == 429
+
+
+def test_a_browser_that_signed_in_before_can_still_sign_in_during_an_attack(signed_out, monkeypatch):
+    client = signed_out
+    r = sign_in(client)
+    device = r.cookies["hk_device"]
+    assert any("hk_device=" in c and "HttpOnly" in c for c in cookies(r))
+    client.post("/logout")
+    client.cookies.clear()
+    for i in range(main.FAILURE_LIMITS["everyone"]):  # strangers lock out everyone else
+        from_address(monkeypatch, f"203.0.113.{i}")
+        guess(client, 1)
+    assert sign_in(client).status_code == 429  # a stranger's browser: refused
+    client.cookies.clear()
+    client.cookies.set("hk_device", device)
+    assert sign_in(client).status_code == 303  # the owner's browser: still fine
+    # A forged or stale mark doesn't help, and Sign out everywhere withdraws real ones.
+    client.post("/logout", data={"everywhere": "true"})
+    client.cookies.clear()
+    client.cookies.set("hk_device", device)
+    assert sign_in(client).status_code == 429
 
 
 def test_wrong_basic_auth_counts_toward_the_limit(signed_out):
     bad = "Basic " + base64.b64encode(b"admin:guess").decode()
-    for _ in range(main.FAILURE_LIMIT):
+    for _ in range(main.FAILURE_LIMITS["address"]):
         signed_out.get("/api/settings", headers={"Authorization": bad})
     assert sign_in(signed_out).status_code == 429
 
@@ -450,3 +492,89 @@ def test_page_links_versioned_assets(client):
     from app import __version__
     html = client.get("/").text
     assert f'/static/style.css?v={__version__}"' in html and f'/static/app.js?v={__version__}"' in html
+
+
+# ---------- second review ----------
+
+REAL_CLOCK = main.clock  # the fixture replaces it; the time zone test needs the real one
+
+
+def test_a_slow_upload_doesnt_hold_up_other_requests(client, monkeypatch):
+    import anyio
+    import httpx
+
+    def slow_scan(data, mime):
+        time.sleep(0.8)  # Claude reading the photo
+        raise RuntimeError("done")
+    monkeypatch.setattr(ai, "scan_item", slow_scan)
+    finished = []
+
+    async def run():
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            async def scan():
+                await c.post("/api/assets/scan", files={"file": ("p.png", b"\x89PNG\r\n\x1a\n" + b"\0" * 64, "image/png")})
+                finished.append("scan")
+
+            async def health():
+                await anyio.sleep(0.1)
+                await c.get("/api/health")
+                finished.append("health")
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(scan)
+                tg.start_soon(health)
+    anyio.run(run)
+    assert finished == ["health", "scan"]
+
+
+def test_moving_a_task_to_another_car_keeps_odometers_apart(client):
+    car_a = client.post("/api/assets", json={"category": "vehicle", "name": "Civic", "mileage": 50000}).json()
+    car_b = client.post("/api/assets", json={"category": "vehicle", "name": "Outback", "mileage": 60000}).json()
+    oil = task(client, title="Oil change", recurrence="mileage", mileage_interval=5000, interval_days=365, asset_id=car_a["id"])
+    done = client.post("/api/completions", json={"task_id": oil["id"], "mileage": 60000}).json()  # car A now at 60,000
+    client.put(f"/api/tasks/{oil['id']}", json={**{k: oil[k] for k in ("title", "recurrence", "mileage_interval", "interval_days")},
+                                                "asset_id": car_b["id"]})
+    status = [t for t in client.get("/api/tasks").json() if t["id"] == oil["id"]][0]
+    assert "mi since last" not in status["reason"]  # car A's reading says nothing about car B
+    client.delete(f"/api/completions/{done['id']}")
+    odometers = {a["name"]: a["mileage"] for a in client.get("/api/assets").json()}
+    assert odometers == {"Civic": 50000, "Outback": 60000}  # car A put back, car B untouched
+
+
+def test_today_follows_the_time_zone_setting(client, monkeypatch):
+    monkeypatch.setattr(main, "clock", REAL_CLOCK)
+    client.put("/api/settings", json={"timezone": "Pacific/Kiritimati"})  # UTC+14
+    ahead = main.clock()
+    client.put("/api/settings", json={"timezone": "Pacific/Pago_Pago"})   # UTC-11
+    behind = main.clock()
+    assert (ahead - behind).days in (1, 2)  # 25 hours apart: never the same date
+    assert client.put("/api/settings", json={"timezone": "Mars/Olympus_Mons"}).status_code == 400
+    assert client.get("/api/settings").json()["timezone"] == "Pacific/Pago_Pago"
+
+
+def test_previews_ignore_work_done_after_the_preview_date(client):
+    t = task(client, interval_days=30)
+    client.post("/api/completions", json={"task_id": t["id"], "done_on": "2026-10-13"})
+    assert [i["id"] for i in client.get("/api/plan?as_of=2026-10-05").json()["items"]] == [t["id"]]
+    status = [x for x in client.get("/api/tasks?as_of=2026-10-05").json() if x["id"] == t["id"]][0]
+    assert status["reason"] == "Never logged"
+
+
+def test_completions_cant_be_in_the_future(client):
+    t = task(client)
+    assert client.post("/api/completions", json={"task_id": t["id"], "done_on": "2026-10-20"}).status_code == 400
+    assert client.post("/api/completions", json={"task_id": t["id"], "done_on": "2026-10-14"}).status_code == 200  # a day's slack
+    s = task(client, status="suggested", title="Flush water heater")
+    assert client.post(f"/api/tasks/{s['id']}/approve", json={"last_done_on": "2026-11-01"}).status_code == 400
+
+
+def test_deleting_an_item_removes_its_rows_even_if_a_file_wont_delete(client, monkeypatch):
+    asset = client.post("/api/assets", json={"category": "appliance", "name": "Dryer"}).json()
+    client.post("/api/documents/upload", data={"asset_id": asset["id"], "read": "false"},
+                files={"file": ("m.txt", b"Clean the lint trap every load.\n" * 20, "text/plain")})
+
+    def stuck(doc):
+        raise PermissionError("file is in use")
+    monkeypatch.setattr(documents, "delete_file", stuck)
+    assert client.delete(f"/api/assets/{asset['id']}").status_code == 200
+    assert client.get("/api/assets").json() == [] and client.get("/api/documents").json() == []

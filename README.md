@@ -101,7 +101,7 @@ The volume name is the same wherever you put the folder. Check it with `docker v
 - With a password set, the app shows a sign-in page that browsers and password managers can save. **Keep me signed in** keeps a browser signed in for 90 days, extended as you use it, up to a year. Without it, you're signed out when the browser closes or after 12 hours of not using the app.
 - **Sign out** (under Settings) signs out only that browser. **Sign out everywhere** signs out every phone and computer, for example after losing one. Changing the password does the same.
 - Sessions are signed with a random key stored as `session.key` next to the database, so they survive restarts and updates. It's kept out of git and the Docker image; don't share it.
-- After 10 wrong passwords within a minute, all sign-ins are refused for a minute, even with the right password. People already signed in aren't affected.
+- Wrong passwords are limited: 5 from one network address within 10 minutes, or 50 from everyone together, and then sign-in is refused for a while, even with the right password. A browser that has signed in before has its own allowance instead, so strangers guessing can't lock you out of your own devices. People already signed in aren't affected.
 - Scripts and uptime monitors can use HTTP basic auth (`curl -u admin:password`). Tools that wait to be asked for a password, like `wget`, also work.
 - The app refuses changes sent from other websites' pages.
 - The app is a single process with a SQLite database, so run one container. It isn't designed to scale horizontally.
@@ -125,10 +125,11 @@ All settings are environment variables. With Docker, put them in `.env`.
 | `PORT` | `8000` | Port on the host. |
 | `HOUSEKEEPING_ALLOWED_HOSTS` | (none) | Extra host names the app answers to, comma-separated. A leading dot matches subdomains (`.example.com`), and `*` allows any. |
 | `FORWARDED_ALLOW_IPS` | `*` in Docker | Addresses whose `X-Forwarded-*` headers are trusted. |
+| `HOUSEKEEPING_TIMEZONE` | the server's | Fallback time zone for "today", e.g. `America/New_York`, until one is set under **Settings**. The app sets it from your browser the first time you open it. |
 | `HOUSEKEEPING_SECURE_COOKIES` | `false` | Always mark the sign-in cookie HTTPS-only. Set it when you only reach the app over HTTPS. |
 | `HOUSEKEEPING_VERSION` | `latest` | Image tag Compose runs, e.g. `0.2.0` or `0.2`. |
 
-Location, climate notes, hemisphere and plan size are set in the app, under **Settings**.
+Location, climate notes, hemisphere, time zone and plan size are set in the app, under **Settings**. The time zone decides when "today" rolls over. Without it, a server in Docker uses UTC.
 
 **About Claude and your documents:**
 - Find manuals uses Claude's web search and web fetch tools. These must be enabled for your organization in the Anthropic Console.

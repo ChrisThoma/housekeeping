@@ -112,13 +112,16 @@ def all_task_status(conn, today: date) -> list[dict]:
     rows = conn.execute(
         """
         SELECT t.*, a.name AS asset_name, a.category AS asset_category, a.mileage AS asset_mileage,
-               (SELECT MAX(done_on) FROM completions c WHERE c.task_id = t.id) AS last_done_on,
-               (SELECT mileage FROM completions c WHERE c.task_id = t.id AND c.mileage IS NOT NULL
+               (SELECT MAX(done_on) FROM completions c WHERE c.task_id = t.id AND c.done_on <= :today) AS last_done_on,
+               -- Only readings from the item the task is on now: it may have been moved from another car.
+               (SELECT mileage FROM completions c WHERE c.task_id = t.id AND c.mileage IS NOT NULL AND c.done_on <= :today
+                  AND (c.asset_id IS NULL OR c.asset_id = t.asset_id)
                 ORDER BY done_on DESC, id DESC LIMIT 1) AS last_mileage
         FROM tasks t
         LEFT JOIN assets a ON a.id = t.asset_id
         WHERE t.status = 'active'
-        """
+        """,
+        {"today": today.isoformat()},
     ).fetchall()
     out = []
     for r in rows:
@@ -170,7 +173,8 @@ def get_plan(conn, settings: dict, today: date, regenerate: bool = False, extra:
     count = plan_size(settings)
     period, start, end = period_for(mode, today)
     statuses = all_task_status(conn, today)
-    span = (start.isoformat(), end.isoformat())
+    # Completions count up to today: a preview of an earlier date mustn't see work done after it.
+    span = (start.isoformat(), min(end, today).isoformat())
     done_in_period = {r["task_id"] for r in conn.execute("SELECT task_id FROM completions WHERE done_on BETWEEN ? AND ?", span)}
 
     saved = [r["task_id"] for r in conn.execute("SELECT task_id FROM plan_items WHERE period = ? ORDER BY rowid", (period,))]

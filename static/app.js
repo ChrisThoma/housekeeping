@@ -958,6 +958,9 @@ async function loadSettings() {
   $("#set-hemisphere").value = s.hemisphere;
   $("#set-mode").value = s.plan_mode;
   $("#set-count").value = s.plan_count;
+  $("#set-timezone").value = s.timezone;
+  const zones = $("#timezones");
+  if (!zones.children.length && Intl.supportedValuesOf) zones.innerHTML = Intl.supportedValuesOf("timeZone").map((z) => `<option value="${esc(z)}">`).join("");
 }
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -967,6 +970,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
     hemisphere: $("#set-hemisphere").value,
     plan_mode: $("#set-mode").value,
     plan_count: String(Math.max(1, +$("#set-count").value || 5)),
+    timezone: $("#set-timezone").value.trim(),
   });
   toast("Saved");
 });
@@ -1010,5 +1014,15 @@ $("#today-label").textContent = (AS_OF ? "Preview of " : "") + fmtDate(todayISO(
 if (new URLSearchParams(location.search).has("as_of") && !AS_OF) toast("The as_of date should look like 2026-11-20, so showing today.", true);
 loadStatus();
 refreshBadge();
+// The server decides what "today" is, so tell it this browser's time zone the first time.
+(async () => {
+  if (AS_OF) return;
+  const s = await api("GET", "/api/settings");
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (!s.timezone && zone) {
+    await api("PUT", "/api/settings", { timezone: zone });
+    if (!$("#tab-plan").hidden) loadPlan();
+  }
+})();
 const startTab = location.hash.slice(1);
 showTab(LOADERS[startTab] ? startTab : "plan");
