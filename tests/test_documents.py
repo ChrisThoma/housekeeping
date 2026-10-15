@@ -1,3 +1,4 @@
+import json
 import io
 from types import SimpleNamespace
 
@@ -131,6 +132,26 @@ def test_find_documents_downloads_and_reads(client, monkeypatch):
     assert not path.exists() and client.get("/api/documents").json() == []
 
 
+def test_found_documents_without_care_instructions_are_dropped(client, monkeypatch):
+    monkeypatch.setattr(ai, "find_documents", lambda asset, settings: [
+        ai.FoundDocument(title="Spec sheet", url="https://example.com/spec.pdf", kind="other", why="Official"),
+        ai.FoundDocument(title="Use and Care", url="https://example.com/care.pdf", kind="manual", why="Official"),
+    ])
+    monkeypatch.setattr(documents, "download", lambda url: (make_pdf(["x"]), "application/pdf", url.rsplit("/", 1)[1]))
+    spec = NOTES.model_copy(update={"document_type": "Spec sheet", "maintenance": []})
+    forgotten = []
+    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset: (spec if "spec" in doc["filename"] else NOTES, "full", f"file_{doc['id']}"))
+    monkeypatch.setattr(ai, "forget_file", forgotten.append)
+
+    dw = client.post("/api/assets", json={"category": "appliance", "name": "Dishwasher"}).json()
+    r = client.post(f"/api/assets/{dw['id']}/find-documents").json()
+    assert [d["title"] for d in r["added"]] == ["Use and Care"]
+    assert r["skipped"][0]["reason"] == "no maintenance instructions (Spec sheet)"
+    saved = client.get("/api/documents").json()
+    assert [d["title"] for d in saved] == ["Use and Care"]
+    assert len(list(documents.docs_dir().iterdir())) == 1 and forgotten == ["file_1"]
+
+
 def test_long_pdfs_are_read_as_text(tmp_path, monkeypatch):
     monkeypatch.setattr(ai, "FULL_READ_MAX_PAGES", 2)
     uploads = []
@@ -146,3 +167,35 @@ def test_long_pdfs_are_read_as_text(tmp_path, monkeypatch):
     block, mode, _ = ai.document_block({"mime": "application/pdf", "title": "Long", "filename": "long.pdf", "pages": 3}, long)
     assert mode == "text" and "Filter every 90 days" in block["source"]["data"]
     assert len(uploads) == 1
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+def test_scan_fills_in_an_item_and_keeps_the_label(client, monkeypatch):
+    scan = ai.ScannedItem(readable=True, problem=None, category="appliance", name="Dishwasher", make="Bosch",
+                          model="SHXM78Z55N/18", serial="FD 9907", year=2019, year_basis="Bosch FD 9907 = July 2019",
+                          mileage=12, specs=[ai.Part(name="Rinse aid", spec="setting r:05")], care=[])
+    monkeypatch.setattr(ai, "scan_item", lambda data, mime: scan)
+    r = client.post("/api/assets/scan", files={"file": ("label.png", PNG, "image/png")}).json()
+    assert r["details"] == "Bosch SHXM78Z55N/18" and r["year"] == 2019 and r["category"] == "appliance"
+    assert r["mileage"] is None  # only vehicles have an odometer
+    assert r["notes"] == "Serial FD 9907 · Rinse aid: setting r:05"
+    assert "serial FD 9907" in r["label_notes"]["model_identified"]
+
+    asset = client.post("/api/assets", json={"category": "appliance", "name": "Dishwasher", "details": r["details"]}).json()
+    up = client.post("/api/documents/upload", files={"file": ("label.png", PNG, "image/png")},
+                     data={"asset_id": asset["id"], "kind": "photo", "notes": json.dumps(r["label_notes"])}).json()
+    assert up["read_error"] is None
+    assert up["document"]["notes"]["document_type"] == "Data plate photo"
+    assert up["document"]["notes"]["parts"][0]["spec"] == "setting r:05"
+
+
+def test_scan_rejects_unreadable_photos_and_non_images(client, monkeypatch):
+    blurry = ai.ScannedItem(readable=False, problem="Too much glare on the label.", category="appliance", name="",
+                            make=None, model=None, serial=None, year=None, year_basis=None, mileage=None, specs=[], care=[])
+    monkeypatch.setattr(ai, "scan_item", lambda data, mime: blurry)
+    r = client.post("/api/assets/scan", files={"file": ("label.png", PNG, "image/png")})
+    assert r.status_code == 422 and r.json()["detail"] == "Too much glare on the label."
+    assert client.post("/api/assets/scan", files={"file": ("m.pdf", make_pdf(["x"]), "application/pdf")}).status_code == 400
+    assert client.get("/api/assets").json() == []

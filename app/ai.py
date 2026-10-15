@@ -1,4 +1,5 @@
 """Claude-powered task suggestions. Results are stored as status='suggested' until you approve them."""
+import base64
 import json
 import os
 from datetime import date
@@ -253,13 +254,21 @@ REPORT_TOOL = {
     },
 }
 
-FINDER_SYSTEM = """You find official maintenance documentation for things a homeowner owns: owner's manuals, use-and-care guides,
-maintenance schedules, and for plants, reputable care guides (university extension services are ideal).
+FINDER_SYSTEM = """You find the document that tells a homeowner how to look after something they own: the owner's manual
+(often called "Use and Care"), or a maintenance schedule. For plants, a reputable care guide (university extension services are ideal).
 
-- Prefer the manufacturer's own site, then reputable manual archives. Avoid sites that gate downloads behind sign-ups or ads.
-- Prefer direct PDF links. Use web_fetch to confirm a link actually serves the document before reporting it.
-- If the exact model is unknown, find the closest match for the brand, type and year and say so in "why".
-- Report at most 3 documents, best first. Report an empty list rather than guessing.
+What counts: a document with care, cleaning or maintenance instructions for this model.
+What does not count, even from the manufacturer: spec sheets, energy guides, installation-only instructions, parts lists,
+retailer product or parts pages, and pages that only link to a manual.
+
+- Manufacturers often publish several PDFs per model (spec sheet, installation instructions, use and care). Open them to tell
+  which is which, and report the use and care manual.
+- When a page links to the manual, follow the link and report the file's own URL, not the page.
+- Use web_fetch to confirm each URL serves the manual itself before reporting it.
+- Text after a slash in a model number (SHXM78Z55N/18) is usually a production revision. The base model's manual is fine.
+- Prefer the manufacturer's site, then reputable manual archives. Avoid downloads behind sign-ups.
+- If you can't find the exact model, the manual for the same series is acceptable; say so in "why".
+- Report at most 3 documents, best first. Report an empty list rather than something that doesn't count.
 - When finished, call report_documents."""
 
 
@@ -270,7 +279,7 @@ def find_documents(asset: dict, settings: dict) -> list[FoundDocument]:
     messages = [first]
     tools = [
         {"type": "web_search_20260209", "name": "web_search", "max_uses": 6},
-        {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 8},
+        {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 12},
         REPORT_TOOL,
     ]
     for _ in range(6):
@@ -304,3 +313,47 @@ def forget_file(file_id: str | None):
         client().files.delete(file_id)
     except (anthropic.APIError, TypeError):
         pass  # already gone, offline, or no credentials; nothing for the user to do
+
+
+# ---------- cataloguing from a photo ----------
+
+class ScannedItem(BaseModel):
+    readable: bool = Field(description="False if the photo doesn't show enough to identify the item")
+    problem: Optional[str] = Field(description="If not readable, what to change in the photo, e.g. 'Too much glare on the label; tilt the phone'")
+    category: Literal["appliance", "home", "outdoor", "plant", "vehicle"] = Field(
+        description="appliance: kitchen/laundry/small appliances; home: HVAC, water heater, plumbing, electrical, roof; "
+                    "outdoor: mowers, grills, furniture, pools, decks; plant: trees, shrubs, lawn; vehicle: cars, motorcycles, boats")
+    name: str = Field(description="The everyday name a homeowner would give it, e.g. 'Dishwasher', 'Water heater', 'Honda Civic'")
+    make: Optional[str] = None
+    model: Optional[str] = Field(description="Model number exactly as printed, including any suffix or revision")
+    serial: Optional[str] = None
+    year: Optional[int] = Field(description="Year made (model year for vehicles), only if printed or reliably decoded")
+    year_basis: Optional[str] = Field(description="How you know the year, e.g. 'Printed: MFD 03/2019', 'VIN 10th character K = 2019', "
+                                                  "'Bosch FD 9907 = July 2019'")
+    mileage: Optional[int] = Field(description="Vehicles only: odometer reading if the photo shows one")
+    specs: list[Part] = Field(description="Service-relevant specs printed on the label: filter size, refrigerant, fuel or gas type, "
+                                          "capacity, tire pressure, oil grade. Skip voltage, amps and certifications unless they matter for care.")
+    care: list[ManualItem] = Field(description="Maintenance instructions actually printed on the label, if any")
+
+
+SCAN_SYSTEM = """You catalog things a homeowner owns from a photo of their rating plate, data label, VIN or door-jamb sticker,
+plant tag, or the item itself. Transcribe model and serial numbers character by character exactly as printed; don't guess
+characters you can't read, leave the field null instead. Give a year only when it is printed or you can decode it with
+certainty from the manufacturer's serial or date-code scheme (or a VIN's 10th character), and always say how in year_basis.
+Never invent a year from the model's general era."""
+
+
+def scan_item(image: bytes, mime: str) -> ScannedItem:
+    block = {"type": "image", "source": {"type": "base64", "media_type": mime, "data": base64.standard_b64encode(image).decode()}}
+    return _parse(SCAN_SYSTEM, [block, {"type": "text", "text": "Catalog the item in this photo."}], ScannedItem)
+
+
+def label_notes(s: ScannedItem) -> DocNotes:
+    """What a scan learned, in the same shape as notes from reading a document, so suggestions can use it."""
+    ident = " ".join(x for x in (s.make, s.model) if x) or s.name
+    if s.serial:
+        ident += f", serial {s.serial}"
+    if s.year_basis:
+        ident += f" ({s.year_basis})"
+    return DocNotes(document_type="Data plate photo", model_identified=ident,
+                    summary=f"Photo of the label on the {s.name.lower()}.", maintenance=s.care, parts=s.specs, warnings=[])

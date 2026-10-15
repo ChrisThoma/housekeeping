@@ -199,6 +199,32 @@ def create_asset(a: AssetIn):
         return dict(conn.execute("SELECT * FROM assets WHERE id = ?", (cur.lastrowid,)).fetchone())
 
 
+@app.post("/api/assets/scan")
+async def scan_asset(file: UploadFile = File(...)):
+    """Read a photo of a label or the item itself and return the fields for a new item. Nothing is saved."""
+    data = await file.read(documents.MAX_BYTES + 1)
+    mime = documents.sniff_mime(data, file.content_type or "")
+    if mime not in documents.IMAGE_TYPES:
+        raise HTTPException(400, "Choose a photo (JPEG, PNG, WebP or GIF).")
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(400, "That photo is larger than 5 MB. Try a smaller one.")
+    s = _ai_errors(lambda: ai.scan_item(data, mime))
+    if not s.readable:
+        raise HTTPException(422, s.problem or "Couldn't make out the item in that photo. Try a closer, sharper one.")
+    notes = [f"Serial {s.serial}"] if s.serial else []
+    notes += [f"{p.name}: {p.spec}" for p in s.specs]
+    return {
+        "category": s.category,
+        "name": s.name,
+        "details": " ".join(x for x in (s.make, s.model) if x),
+        "year": s.year,
+        "year_basis": s.year_basis,
+        "mileage": s.mileage if s.category == "vehicle" else None,
+        "notes": " · ".join(notes),
+        "label_notes": ai.label_notes(s).model_dump(),
+    }
+
+
 @app.put("/api/assets/{asset_id}")
 def update_asset(asset_id: int, a: AssetIn):
     with db.connect() as conn:
@@ -312,18 +338,30 @@ def list_documents(asset_id: Optional[int] = None):
 
 @app.post("/api/documents/upload")
 async def upload_document(file: UploadFile = File(...), asset_id: Optional[int] = Form(None),
-                          title: str = Form(""), kind: str = Form("manual"), read: bool = Form(True)):
+                          title: str = Form(""), kind: str = Form("manual"), read: bool = Form(True),
+                          notes: str = Form("")):
     data = await file.read(documents.MAX_BYTES + 1)
     if len(data) > documents.MAX_BYTES:
         raise HTTPException(400, "That file is larger than 60 MB.")
     mime = documents.sniff_mime(data, file.content_type or "")
     if mime is None:
         raise HTTPException(400, "Upload a PDF, an image (PNG, JPEG, WebP, GIF), a text file or a saved web page.")
+    parsed = None
+    if notes:  # already read, e.g. the label photo from a scan
+        try:
+            parsed = ai.DocNotes.model_validate_json(notes)
+        except ValueError:
+            raise HTTPException(400, "notes must match the document notes format")
     if mime.startswith("image/") and kind == "manual":
         kind = "photo"
     doc_id = _store(data=data, mime=mime, filename=file.filename or "upload", title=title or Path(file.filename or "").stem,
                     asset_id=asset_id, kind=kind, source="uploaded")
-    error = _read_and_store(doc_id) if read else None
+    error = None
+    if parsed:
+        with db.connect() as conn:
+            conn.execute("UPDATE documents SET notes = ?, read_mode = 'full' WHERE id = ?", (parsed.model_dump_json(), doc_id))
+    elif read:
+        error = _read_and_store(doc_id)
     with db.connect() as conn:
         return {"document": _doc_row(conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()), "read_error": error}
 
@@ -363,7 +401,20 @@ def find_documents(asset_id: int):
         except (documents.DocumentError, HTTPException) as e:
             skipped.append({"title": f.title, "url": f.url, "reason": getattr(e, "detail", None) or str(e)})
             continue
-        added.append({"id": doc_id, "title": f.title, "why": f.why, "read_error": _read_and_store(doc_id)})
+        read_error = _read_and_store(doc_id)
+        if not read_error:
+            with db.connect() as conn:
+                doc = _get_doc(conn, doc_id)
+                notes = json.loads(doc["notes"])
+                # Search results are only worth keeping if they say how to maintain the item.
+                # Spec sheets and parts pages get read, judged and dropped.
+                if not notes["maintenance"]:
+                    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+            if not notes["maintenance"]:
+                _remove_document(doc)
+                skipped.append({"title": f.title, "url": f.url, "reason": f"no maintenance instructions ({notes['document_type']})"})
+                continue
+        added.append({"id": doc_id, "title": f.title, "why": f.why, "read_error": read_error})
     return {"found": len(found), "added": added, "skipped": skipped}
 
 

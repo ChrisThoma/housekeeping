@@ -143,6 +143,10 @@ label { display: grid; gap: 6px; font-size: 0.8125rem; font-weight: 500; color: 
 .dropzone.compact { min-height: 52px; }
 .dropzone:focus-within, .dropzone.drag { color: var(--ink); box-shadow: 0 0 0 1px var(--accent); }
 .dropzone.has-file { color: var(--ink); background: color-mix(in srgb, var(--done) 10%, transparent); }
+.dropzone.scan { justify-content: flex-start; text-align: left; line-height: 1.4; }
+.dropzone.scan strong { color: var(--ink); font-weight: 600; }
+.dropzone.scan img { width: 48px; height: 48px; flex: none; border-radius: var(--radius-sm); object-fit: cover; }
+.dropzone.scan.busy { pointer-events: none; }
 .dropzone input { position: absolute; inset: 0; height: 100%; opacity: 0; cursor: pointer; }
 
 /* ---------- lists: one surface, hairline-separated rows ---------- */

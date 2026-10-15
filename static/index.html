@@ -178,6 +178,12 @@
   <form id="asset-form" class="modal-body">
     <h2 id="asset-dialog-title">Add item</h2>
     <div class="form-grid">
+      <label class="span2 dropzone scan" id="scan-zone">
+        <img id="scan-preview" alt="" hidden>
+        <span id="scan-text"><strong>Scan a label</strong><br>Take a photo of the model and serial sticker, or the item itself</span>
+        <input type="file" id="scan-file" accept="image/*">
+      </label>
+      <p class="hint span2" id="scan-result" hidden></p>
       <input type="hidden" id="asset-id">
       <label>Kind
         <select id="asset-category">

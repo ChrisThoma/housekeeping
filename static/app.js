@@ -349,7 +349,7 @@ async function loadInventory() {
   on(wrap, "[data-find]", (b) =>
     busy(b, "Searching", async () => {
       const r = await api("POST", `/api/assets/${b.dataset.find}/find-documents`);
-      toast(findSummary(r), !r.added.length && r.skipped.length > 0);
+      toast(findSummary(r), !r.added.length);
       loadInventory();
     })
   );
@@ -386,6 +386,7 @@ function assetRowHTML(a) {
 }
 
 function openAssetForm(a = {}) {
+  resetScan(!a.id);
   openDialog("asset-dialog");
   $("#asset-dialog-title").textContent = a.id ? `Edit ${a.name}` : "Add item";
   $("#asset-id").value = a.id ?? "";
@@ -414,10 +415,90 @@ $("#asset-form").addEventListener("submit", async (e) => {
     mileage: $("#asset-category").value === "vehicle" && $("#asset-mileage").value ? +$("#asset-mileage").value : null,
     notes: $("#asset-notes").value.trim(),
   };
-  await api(id ? "PUT" : "POST", id ? `/api/assets/${id}` : "/api/assets", body);
+  const saved = await api(id ? "PUT" : "POST", id ? `/api/assets/${id}` : "/api/assets", body);
   closeDialog("asset-dialog");
   toast(id ? "Saved" : `Added ${body.name}`);
+  if (!id && scanned) {
+    // Keep the label photo with the item, with what the scan read from it, so suggestions can use it.
+    const form = new FormData();
+    form.append("file", scanned.photo, "label.jpg");
+    form.append("asset_id", saved.id);
+    form.append("kind", "photo");
+    form.append("title", `${body.name} label`);
+    form.append("notes", JSON.stringify(scanned.label_notes));
+    await api("POST", "/api/documents/upload", form).catch(() => {});
+  }
+  scanned = null;
   loadInventory();
+});
+
+// ---------- scanning a label ----------
+
+let scanned = null;  // { photo, label_notes } from the last scan, saved with the new item
+const SCAN_PROMPT = $("#scan-text").innerHTML;
+
+function resetScan(show) {
+  scanned = null;
+  $("#scan-zone").hidden = !show;
+  $("#scan-zone").classList.remove("has-file", "busy");
+  $("#scan-text").innerHTML = SCAN_PROMPT;
+  $("#scan-preview").hidden = true;
+  $("#scan-result").hidden = true;
+  $("#scan-file").value = "";
+}
+
+// Phone photos are often 5 MB or more, and HEIC on iPhones. Re-encode as a JPEG small enough to send,
+// but still sharp enough for the small print on a label.
+async function shrinkPhoto(file, maxSide = 2000) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+}
+
+$("#scan-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const zone = $("#scan-zone");
+  let photo;
+  try {
+    photo = await shrinkPhoto(file);
+  } catch {
+    toast("Couldn't open that photo. Try a JPEG or PNG.", true);
+    return resetScan(true);
+  }
+  $("#scan-preview").src = URL.createObjectURL(photo);
+  $("#scan-preview").hidden = false;
+  zone.classList.add("busy");
+  $("#scan-text").innerHTML = `<span class="spinner" aria-hidden="true"></span> Reading the label…`;
+  const form = new FormData();
+  form.append("file", photo, "label.jpg");
+  let r;
+  try {
+    r = await api("POST", "/api/assets/scan", form);
+  } catch {
+    return resetScan(true);
+  } finally {
+    zone.classList.remove("busy");
+  }
+  scanned = { photo, label_notes: r.label_notes };
+  zone.classList.add("has-file");
+  $("#scan-text").innerHTML = `<strong>${esc(r.details || r.name)}</strong><br>Read from the photo. Choose another to scan again.`;
+  $("#asset-category").value = r.category;
+  $("#asset-name").value = r.name;
+  $("#asset-details").value = r.details;
+  $("#asset-year").value = r.year ?? "";
+  $("#asset-mileage").value = r.mileage ?? "";
+  $("#asset-notes").value = r.notes;
+  toggleMileage();
+  const result = $("#scan-result");
+  result.textContent = (r.year ? `Year: ${r.year_basis || "printed on the label"}. ` : "No year on the label, so add it if you know it. ")
+    + "Check the details, then save.";
+  result.hidden = false;
 });
 
 // ---------- manuals ----------
@@ -426,13 +507,18 @@ const KIND_LABELS = { manual: "Owner's manual", maintenance: "Maintenance schedu
 const SOURCE_LABELS = { found: "Found online", uploaded: "Uploaded", link: "From a link" };
 
 function findSummary(r) {
-  if (!r.found) return "No manuals found. Adding the exact model usually helps.";
+  if (!r.found) return "No manuals found. Adding the exact model usually helps, or upload one.";
+  const notManuals = r.skipped.filter((d) => d.reason.startsWith("no maintenance")).length;
+  const other = r.skipped.filter((d) => !d.reason.startsWith("no maintenance") && d.reason !== "Already saved");
   const parts = [];
   if (r.added.length) parts.push(`Saved ${r.added.map((d) => d.title).join(", ")}`);
-  if (r.skipped.length) parts.push(`Skipped ${r.skipped.length} (${r.skipped.map((d) => d.reason).join("; ")})`);
+  else if (notManuals) parts.push(`Found ${plural(notManuals, "document")}, but no care instructions in ${notManuals === 1 ? "it" : "them"}. Upload the manual if you have it`);
+  else parts.push("Nothing new found");
+  if (r.added.length && notManuals) parts.push(`Left out ${notManuals} without care instructions`);
+  if (other.length) parts.push(`Couldn't download ${other.length}: ${other[0].reason}`);
   const unread = r.added.filter((d) => d.read_error);
   if (unread.length) parts.push(`Couldn't read ${unread.length}: ${unread[0].read_error}`);
-  return parts.join(". ");
+  return parts.join(". ") + ".";
 }
 
 function fillAssetSelects() {
