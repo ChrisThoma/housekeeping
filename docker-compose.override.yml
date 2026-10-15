@@ -1,0 +1,5 @@
+# Compose loads this automatically when it's present, so running from a clone builds your local source.
+services:
+  housekeeping:
+    build: .
+    image: housekeeping:dev

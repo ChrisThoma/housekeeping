@@ -1,16 +1,32 @@
-name: Publish image
+name: Release
 
-# Pushing a tag like v0.2.0 publishes ghcr.io/<owner>/<repo>:0.2.0 and :latest for amd64 and arm64.
+# Pushing a tag like v0.2.0 runs the tests, then publishes ghcr.io/<owner>/<repo>:0.2.0, :0.2 and :latest
+# for amd64 and arm64, and creates a GitHub release. The tag must match __version__ in app/__init__.py.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag matches the app version
+        run: |
+          version=$(python -c "import app; print(app.__version__)")
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME doesn't match app version $version"; exit 1; }
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
   publish:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +43,10 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=Housekeeping
+            org.opencontainers.image.description=A self-hosted home maintenance planner
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -35,3 +54,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag

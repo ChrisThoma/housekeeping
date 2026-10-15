@@ -1,7 +1,9 @@
+# Runs the published image. From a clone of the repository, docker-compose.override.yml builds from source instead.
+name: housekeeping
+
 services:
   housekeeping:
-    build: .
-    image: housekeeping:latest
+    image: ghcr.io/christhoma/housekeeping:${HOUSEKEEPING_VERSION:-latest}
     container_name: housekeeping
     restart: unless-stopped
     ports:

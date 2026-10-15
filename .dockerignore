@@ -10,3 +10,4 @@ data/
 .github/
 tests/
 docs/
+docker-compose*.yml

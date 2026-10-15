@@ -37,4 +37,4 @@ docker compose up --build
 
 ## Releases
 
-Bump `__version__` in `app/__init__.py`, then push a tag such as `v0.2.0`. The release workflow publishes a multi-arch image to the GitHub Container Registry.
+Bump `__version__` in `app/__init__.py`, commit, then push a matching tag such as `v0.2.0`. The release workflow checks that the tag matches, runs the tests, publishes a multi-arch image to the GitHub Container Registry and creates a GitHub release with generated notes.

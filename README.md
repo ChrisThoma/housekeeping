@@ -8,6 +8,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f6b4f)](LICENSE)
 [![Docker](https://img.shields.io/badge/deploy-docker%20compose-2b4c7e)](#quick-start-docker)
+[![CI](https://github.com/ChrisThoma/housekeeping/actions/workflows/ci.yml/badge.svg)](https://github.com/ChrisThoma/housekeeping/actions/workflows/ci.yml)
 
 <img src="docs/screenshot-plan.png" alt="This week's maintenance plan: five tasks with due tags, one checked off" width="860">
 
@@ -35,21 +36,32 @@
 
 ## Quick start (Docker)
 
-You need Docker with Compose v2.24 or later, and an [Anthropic API key](https://console.anthropic.com/settings/keys) for the Claude features.
+You need Docker with Compose v2.24 or later, and an [Anthropic API key](https://console.anthropic.com/settings/keys) for the Claude features. Images are published for amd64 and arm64, so it also runs on a Raspberry Pi 4 or later and on Apple silicon.
 
 ```sh
-git clone <this repository> housekeeping && cd housekeeping
-cp .env.example .env          # then add your ANTHROPIC_API_KEY
+mkdir housekeeping && cd housekeeping
+curl -fsSLO https://raw.githubusercontent.com/ChrisThoma/housekeeping/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/ChrisThoma/housekeeping/main/.env.example -o .env
+# open .env and add your ANTHROPIC_API_KEY
 docker compose up -d
 ```
 
 Open <http://localhost:8000>. The first screen walks you through setup.
 
-Your data lives in the `housekeeping-data` Docker volume: the SQLite database plus every downloaded or uploaded document. To update to a new version:
+Your data lives in the `housekeeping_housekeeping-data` Docker volume: the SQLite database plus every downloaded or uploaded document. To update to the latest release:
 
 ```sh
-git pull && docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
+
+To stay on one version, set `HOUSEKEEPING_VERSION=0.2.0` in `.env`. Without Compose:
+
+```sh
+docker run -d --name housekeeping -p 8000:8000 --env-file .env \
+  -v housekeeping-data:/data --restart unless-stopped ghcr.io/christhoma/housekeeping:latest
+```
+
+To build from source instead, clone the repository and run `docker compose up -d --build`. In a clone, `docker-compose.override.yml` swaps the published image for a local build.
 
 ### Back up and restore
 
@@ -63,7 +75,7 @@ docker run --rm -v housekeeping_housekeeping-data:/data -v "$PWD":/backup alpine
   tar xzf /backup/housekeeping-backup.tar.gz -C /data
 ```
 
-The volume name has the Compose project (the folder name) as a prefix. `docker volume ls` shows it.
+The volume name is the same wherever you put the folder.
 
 ### Running it on a server
 
@@ -84,6 +96,7 @@ All settings are environment variables. With Docker, put them in `.env`.
 | `HOUSEKEEPING_MODEL` | `claude-opus-5-5` | Claude model to use. |
 | `HOUSEKEEPING_DB` | `/data/housekeeping.db` in Docker, `./housekeeping.db` otherwise | Database path. Documents are stored in a `documents/` folder next to it. |
 | `PORT` | `8000` | Port on the host. |
+| `HOUSEKEEPING_VERSION` | `latest` | Image tag Compose runs, e.g. `0.2.0` or `0.2`. |
 
 Location, climate notes, hemisphere and plan size are set in the app, under **Settings**.
 
