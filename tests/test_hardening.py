@@ -578,3 +578,78 @@ def test_deleting_an_item_removes_its_rows_even_if_a_file_wont_delete(client, mo
     monkeypatch.setattr(documents, "delete_file", stuck)
     assert client.delete(f"/api/assets/{asset['id']}").status_code == 200
     assert client.get("/api/assets").json() == [] and client.get("/api/documents").json() == []
+
+
+# ---------- third review ----------
+
+def test_as_of_cant_be_used_to_make_changes(client):
+    t = task(client)
+    r = client.post("/api/completions?as_of=2099-01-01", json={"task_id": t["id"], "done_on": "2099-01-01"})
+    assert r.status_code == 400 and client.get("/api/history").json() == []
+    assert client.post(f"/api/tasks/{t['id']}/snooze?days=7&as_of=2099-01-01").status_code == 400
+    assert client.post("/api/guide?as_of=2099-01-01", json={"text": "Clean gutters each fall"}).status_code == 400
+
+
+def _move_to_another_car(client):
+    car_a = client.post("/api/assets", json={"category": "vehicle", "name": "Civic", "mileage": 50000}).json()
+    car_b = client.post("/api/assets", json={"category": "vehicle", "name": "Outback", "mileage": 60000}).json()
+    oil = task(client, title="Oil change", recurrence="mileage", mileage_interval=5000, interval_days=180, asset_id=car_a["id"])
+    client.post("/api/completions", json={"task_id": oil["id"], "mileage": 50000})
+    client.put(f"/api/tasks/{oil['id']}", json={**{k: oil[k] for k in ("title", "recurrence", "mileage_interval", "interval_days")},
+                                                "asset_id": car_b["id"]})
+    return oil
+
+
+def test_a_task_moved_to_another_car_starts_fresh_there(client):
+    oil = _move_to_another_car(client)
+    status = [t for t in client.get("/api/tasks").json() if t["id"] == oil["id"]][0]
+    assert status["reason"] == "Never logged" and status["last_done_on"] is None
+    assert oil["id"] in [i["id"] for i in client.get("/api/plan").json()["items"]]
+
+
+def test_history_shows_the_item_the_work_was_done_on(client):
+    _move_to_another_car(client)
+    assert [h["asset_name"] for h in client.get("/api/history").json()] == ["Civic"]
+
+
+def test_task_list_agrees_with_the_scheduler_in_a_preview(client):
+    t = task(client, recurrence="once", title="Patch the fence")
+    client.post("/api/completions", json={"task_id": t["id"], "done_on": "2026-10-13"})
+    status = [x for x in client.get("/api/tasks?as_of=2026-10-05").json() if x["id"] == t["id"]][0]
+    assert status["last_done_on"] is None and status["reason"] == "No deadline"
+
+
+def test_files_that_wont_delete_are_retried_later(client, monkeypatch):
+    r = client.post("/api/documents/upload", data={"read": "false"},
+                    files={"file": ("m.txt", b"Clean the coils yearly.\n" * 20, "text/plain")}).json()
+    with db.connect() as conn:
+        conn.execute("UPDATE documents SET anthropic_file_id = 'file_9'")
+    path = documents.path_for(r["document"])
+    real_delete_file = documents.delete_file
+
+    def offline(file_id):
+        raise ConnectionError("offline")
+    monkeypatch.setattr(ai, "forget_file", offline)
+    monkeypatch.setattr(documents, "delete_file", lambda doc: (_ for _ in ()).throw(PermissionError("in use")))
+    assert client.delete(f"/api/documents/{r['document']['id']}").status_code == 200
+    assert path.exists()
+    with db.connect() as conn:
+        assert [tuple(row) for row in conn.execute("SELECT filename, anthropic_file_id FROM pending_cleanup")] == [
+            (path.name, "file_9")]
+
+    forgotten = []  # back online
+    monkeypatch.setattr(ai, "forget_file", forgotten.append)
+    monkeypatch.setattr(documents, "delete_file", real_delete_file)
+    main._cleanup()
+    assert not path.exists() and forgotten == ["file_9"]
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pending_cleanup").fetchone()[0] == 0
+
+
+def test_unknown_items_are_a_clear_error(client):
+    assert client.post("/api/tasks", json={"title": "x", "recurrence": "interval", "interval_days": 30, "asset_id": 999}).status_code == 404
+    t = task(client)
+    assert client.put(f"/api/tasks/{t['id']}", json={"title": "x", "recurrence": "interval", "interval_days": 30, "asset_id": 999}).status_code == 404
+    r = client.post("/api/documents/upload", data={"asset_id": 999, "read": "false"},
+                    files={"file": ("m.txt", b"Clean the coils yearly.\n" * 20, "text/plain")})
+    assert r.status_code == 404 and client.get("/api/documents").json() == []

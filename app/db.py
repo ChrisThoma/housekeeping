@@ -85,6 +85,12 @@ MIGRATIONS = [
     # 3: which item a completion was for, so moving a task to another car can't mix up their odometers.
     ("ALTER TABLE completions ADD COLUMN asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL",
      "UPDATE completions SET asset_id = (SELECT asset_id FROM tasks WHERE tasks.id = completions.task_id)"),
+    # 4: files of deleted documents still to remove, locally or from Anthropic, kept until removing them works.
+    """CREATE TABLE pending_cleanup (
+        id                INTEGER PRIMARY KEY,
+        filename          TEXT,
+        anthropic_file_id TEXT
+    )""",
 ]
 
 DEFAULT_SETTINGS = {

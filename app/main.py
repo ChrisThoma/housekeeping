@@ -50,6 +50,8 @@ SECURE_COOKIES = os.environ.get("HOUSEKEEPING_SECURE_COOKIES", "").lower() in ("
 @asynccontextmanager
 async def lifespan(_app):
     db.init()
+    # Files left over from deletes that failed last time. In the background: offline, it would hold up startup.
+    threading.Thread(target=_cleanup, daemon=True).start()
     if not PASSWORD:
         log.warning("Sign-in is off. Anyone who can reach this port can see your data and use your API credit. "
                     "Set HOUSEKEEPING_PASSWORD unless the app is only reachable from this computer.")
@@ -236,6 +238,19 @@ def today(override: Optional[str] = None) -> date:
         return date.fromisoformat(override)
     except ValueError:
         raise HTTPException(400, "as_of must be a date like 2026-11-20")
+
+
+def _require_asset(asset_id: Optional[int]):
+    """A clear error for a task or document pointing at an item that doesn't exist, instead of a database error."""
+    if asset_id is not None:
+        with db.connect() as conn:
+            _require(conn, "assets", asset_id, "Item")
+
+
+def _no_preview(as_of: Optional[str]):
+    """Changes always happen today: as_of is only for previewing, and would otherwise let you log work in the future."""
+    if as_of:
+        raise HTTPException(400, "Previews are read-only. Remove as_of to make changes.")
 
 
 def _require(conn, table: str, row_id: int, what: str):
@@ -515,13 +530,14 @@ def delete_asset(asset_id: int):
     with db.connect() as conn:
         docs = [dict(d) for d in conn.execute("SELECT * FROM documents WHERE asset_id = ?", (asset_id,))]
         conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
-    for doc in docs:
-        _remove_document(doc)
+        _queue_cleanup(conn, docs)
+    _cleanup()
     return {"ok": True}
 
 
 @app.post("/api/assets/{asset_id}/suggest")
 def suggest_for_asset(asset_id: int, as_of: Optional[str] = None):
+    _no_preview(as_of)
     with db.connect() as conn:
         asset = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
         if not asset:
@@ -531,7 +547,7 @@ def suggest_for_asset(asset_id: int, as_of: Optional[str] = None):
         settings = db.get_settings(conn)
         doc_notes = [(r["title"], json.loads(r["notes"])) for r in conn.execute(
             "SELECT title, notes FROM documents WHERE asset_id = ? AND notes IS NOT NULL", (asset_id,))]
-    suggestions = _ai_errors(lambda: ai.suggest_for_asset(dict(asset), existing, settings, today(as_of), doc_notes))
+    suggestions = _ai_errors(lambda: ai.suggest_for_asset(dict(asset), existing, settings, clock(), doc_notes))
     with db.connect() as conn:
         n = _insert_suggestions(conn, suggestions, lambda s: asset_id, "ai")
     return {"added": n}
@@ -539,13 +555,14 @@ def suggest_for_asset(asset_id: int, as_of: Optional[str] = None):
 
 @app.post("/api/guide")
 def import_guide(g: GuideIn, as_of: Optional[str] = None):
+    _no_preview(as_of)
     if not g.text.strip():
         raise HTTPException(400, "Paste your guide first")
     with db.connect() as conn:
         assets = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM assets")}
         existing = [r["title"] for r in conn.execute("SELECT title FROM tasks WHERE status != 'paused'")]
         settings = db.get_settings(conn)
-    suggestions = _ai_errors(lambda: ai.parse_guide(g.text, list(assets), existing, settings, today(as_of)))
+    suggestions = _ai_errors(lambda: ai.parse_guide(g.text, list(assets), existing, settings, clock()))
     with db.connect() as conn:
         n = _insert_suggestions(conn, suggestions, lambda s: assets.get(s.asset_name or ""), "guide")
     return {"added": n}
@@ -573,13 +590,39 @@ def _get_doc(conn, doc_id: int) -> dict:
     return dict(r)
 
 
-def _remove_document(doc: dict):
-    """Best-effort cleanup after a document's row is gone: a file that can't be deleted is logged, not fatal."""
-    try:
-        documents.delete_file(doc)
-    except OSError as e:
-        log.warning("Couldn't delete %s: %s", doc.get("filename"), e)
-    ai.forget_file(doc.get("anthropic_file_id"))
+def _queue_cleanup(conn, docs: list[dict]):
+    """Note the files of documents being deleted, in the same transaction that deletes their rows, so a file
+    that won't delete now is retried later instead of being forgotten."""
+    conn.executemany("INSERT INTO pending_cleanup (filename, anthropic_file_id) VALUES (?, ?)",
+                     [(d["filename"] or None, d["anthropic_file_id"]) for d in docs if d["filename"] or d["anthropic_file_id"]])
+
+
+_cleanup_lock = threading.Lock()
+
+
+def _cleanup():
+    """Remove the files of deleted documents. Whatever fails stays queued for the next try (each delete, and startup)."""
+    with _cleanup_lock, db.connect() as conn:
+        for row in conn.execute("SELECT * FROM pending_cleanup").fetchall():
+            filename, file_id = row["filename"], row["anthropic_file_id"]
+            if filename:
+                try:
+                    documents.delete_file({"filename": filename})
+                    filename = None
+                except OSError as e:
+                    log.warning("Couldn't delete %s, will try again later: %s", filename, e)
+            if file_id:
+                try:
+                    ai.forget_file(file_id)
+                    file_id = None
+                except Exception as e:  # offline, no credentials, an API error
+                    log.warning("Couldn't remove %s from Anthropic, will try again later: %s", file_id, e)
+            if filename or file_id:
+                conn.execute("UPDATE pending_cleanup SET filename = ?, anthropic_file_id = ? WHERE id = ?",
+                             (filename, file_id, row["id"]))
+            else:
+                conn.execute("DELETE FROM pending_cleanup WHERE id = ?", (row["id"],))
+            conn.commit()
 
 
 def _remember_file(doc_id: int, file_id: str):
@@ -639,6 +682,7 @@ def _upload(data: bytes, filename: str, content_type: str, asset_id: Optional[in
             read: bool, notes: str) -> dict:
     if len(data) > documents.MAX_BYTES:
         raise HTTPException(400, "That file is larger than 60 MB.")
+    _require_asset(asset_id)
     mime = documents.sniff_mime(data, content_type)
     if mime is None:
         raise HTTPException(400, "Upload a PDF, an image (PNG, JPEG, WebP, GIF), a text file or a saved web page.")
@@ -664,6 +708,7 @@ def _upload(data: bytes, filename: str, content_type: str, asset_id: Optional[in
 
 @app.post("/api/documents/link")
 def add_document_link(body: LinkIn):
+    _require_asset(body.asset_id)
     try:
         data, mime, filename = documents.download(body.url.strip())
     except documents.DocumentError as e:
@@ -722,8 +767,9 @@ def _find_documents(asset_id: int):
                 # Spec sheets and parts pages get read, judged and dropped.
                 if not notes["maintenance"]:
                     conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+                    _queue_cleanup(conn, [doc])
             if not notes["maintenance"]:
-                _remove_document(doc)
+                _cleanup()
                 skipped.append({"title": f.title, "url": f.url, "reason": f"no maintenance instructions ({notes['document_type']})"})
                 continue
         added.append({"id": doc_id, "title": f.title, "why": f.why, "read_error": read_error})
@@ -742,6 +788,7 @@ def reread_document(doc_id: int):
 @app.post("/api/documents/{doc_id}/tasks")
 def tasks_from_document(doc_id: int, as_of: Optional[str] = None):
     """Item documents: re-run suggestions using all of that item's manuals. General guides: turn the guide into tasks."""
+    _no_preview(as_of)
     with db.connect() as conn:
         doc = _get_doc(conn, doc_id)
     if doc["asset_id"]:
@@ -756,7 +803,7 @@ def tasks_from_document(doc_id: int, as_of: Optional[str] = None):
         if file_id and file_id != doc.get("anthropic_file_id"):
             with db.connect() as conn:
                 conn.execute("UPDATE documents SET anthropic_file_id = ? WHERE id = ?", (file_id, doc_id))
-        return ai.parse_guide(None, list(assets), existing, settings, today(as_of), attachment=block)
+        return ai.parse_guide(None, list(assets), existing, settings, clock(), attachment=block)
 
     suggestions = _ai_errors(run)
     with db.connect() as conn:
@@ -782,7 +829,8 @@ def delete_document(doc_id: int):
     with db.connect() as conn:
         doc = _get_doc(conn, doc_id)
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
-    _remove_document(doc)
+        _queue_cleanup(conn, [doc])
+    _cleanup()
     return {"ok": True}
 
 
@@ -793,11 +841,13 @@ def list_tasks(as_of: Optional[str] = None):
     d = today(as_of)
     with db.connect() as conn:
         status = {t["id"]: t for t in scheduler.all_task_status(conn, d)}
+        # The same last-done date the scheduler uses, so a preview doesn't show work done after its date.
         rows = conn.execute(
-            """SELECT t.*, a.name AS asset_name, a.category AS asset_category,
-                      (SELECT MAX(done_on) FROM completions c WHERE c.task_id = t.id) AS last_done_on
+            f"""SELECT t.*, a.name AS asset_name, a.category AS asset_category,
+                      {scheduler.LAST_DONE_ON} AS last_done_on
                FROM tasks t LEFT JOIN assets a ON a.id = t.asset_id
-               ORDER BY t.status, a.category, a.name, t.title"""
+               ORDER BY t.status, a.category, a.name, t.title""",
+            {"today": d.isoformat()},
         ).fetchall()
         out = []
         for r in rows:
@@ -812,6 +862,7 @@ def list_tasks(as_of: Optional[str] = None):
 @app.post("/api/tasks")
 def create_task(t: TaskIn):
     _validate_task(t)
+    _require_asset(t.asset_id)
     with db.connect() as conn:
         cur = conn.execute(
             f"INSERT INTO tasks ({', '.join(TASK_FIELDS)}) VALUES ({', '.join('?' * len(TASK_FIELDS))})",
@@ -825,6 +876,7 @@ def create_task(t: TaskIn):
 @app.put("/api/tasks/{task_id}")
 def update_task(task_id: int, t: TaskIn):
     _validate_task(t)
+    _require_asset(t.asset_id)
     with db.connect() as conn:
         _require(conn, "tasks", task_id, "Task")
         conn.execute(
@@ -865,7 +917,8 @@ def set_task_status(task_id: int, status: str):
 
 @app.post("/api/tasks/{task_id}/snooze")
 def snooze_task(task_id: int, days: int = Query(7, ge=1, le=3650), as_of: Optional[str] = None):
-    d = today(as_of)
+    _no_preview(as_of)
+    d = clock()
     until = d + timedelta(days=days)
     with db.connect() as conn:
         _require(conn, "tasks", task_id, "Task")
@@ -890,10 +943,11 @@ def delete_task(task_id: int):
 
 @app.post("/api/completions")
 def complete(c: CompletionIn, as_of: Optional[str] = None):
+    _no_preview(as_of)
     # A day of slack, for a browser a time zone ahead of the server's idea of today.
-    if c.done_on and c.done_on > today(as_of) + timedelta(days=1):
+    if c.done_on and c.done_on > clock() + timedelta(days=1):
         raise HTTPException(400, "A completion can't be dated in the future.")
-    done_on = (c.done_on or today(as_of)).isoformat()
+    done_on = (c.done_on or clock()).isoformat()
     with db.connect() as conn:
         task = _require(conn, "tasks", c.task_id, "Task")
         asset = conn.execute("SELECT * FROM assets WHERE id = ?", (task["asset_id"],)).fetchone() if task["asset_id"] else None
@@ -931,7 +985,8 @@ def history(limit: int = Query(200, ge=1, le=5000)):
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT c.*, t.title, a.name AS asset_name FROM completions c
-               JOIN tasks t ON t.id = c.task_id LEFT JOIN assets a ON a.id = t.asset_id
+               -- The item the work was done on, which may not be the one the task is on now.
+               JOIN tasks t ON t.id = c.task_id LEFT JOIN assets a ON a.id = COALESCE(c.asset_id, t.asset_id)
                ORDER BY c.done_on DESC, c.id DESC LIMIT ?""", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -944,11 +999,6 @@ def plan(as_of: Optional[str] = None):
     """With as_of, a preview: the plan that date would get, computed without saving anything."""
     with db.connect() as conn:
         return scheduler.get_plan(conn, db.get_settings(conn), today(as_of), persist=as_of is None)
-
-
-def _no_preview(as_of: Optional[str]):
-    if as_of:
-        raise HTTPException(400, "Previews are read-only. Remove as_of to change the plan.")
 
 
 @app.post("/api/plan/regenerate")

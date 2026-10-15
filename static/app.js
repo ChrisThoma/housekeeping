@@ -1014,15 +1014,17 @@ $("#today-label").textContent = (AS_OF ? "Preview of " : "") + fmtDate(todayISO(
 if (new URLSearchParams(location.search).has("as_of") && !AS_OF) toast("The as_of date should look like 2026-11-20, so showing today.", true);
 loadStatus();
 refreshBadge();
-// The server decides what "today" is, so tell it this browser's time zone the first time.
+// The server decides what "today" is, so tell it this browser's time zone the first time, before loading
+// anything: a plan made first would be saved for the server's day, which near midnight may not be yours.
 (async () => {
-  if (AS_OF) return;
-  const s = await api("GET", "/api/settings");
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (!s.timezone && zone) {
-    await api("PUT", "/api/settings", { timezone: zone });
-    if (!$("#tab-plan").hidden) loadPlan();
+  try {
+    if (!AS_OF) {
+      const s = await api("GET", "/api/settings");
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (!s.timezone && zone) await api("PUT", "/api/settings", { timezone: zone });
+    }
+  } finally {
+    const startTab = location.hash.slice(1);
+    showTab(LOADERS[startTab] ? startTab : "plan");
   }
 })();
-const startTab = location.hash.slice(1);
-showTab(LOADERS[startTab] ? startTab : "plan");

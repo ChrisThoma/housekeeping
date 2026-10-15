@@ -309,13 +309,14 @@ def find_documents(asset: dict, settings: dict) -> list[FoundDocument]:
 
 
 def forget_file(file_id: str | None):
-    """Remove a document from Anthropic's file storage when you delete it here."""
+    """Remove a document from Anthropic's file storage when you delete it here. Raises if it couldn't be
+    removed (offline, no credentials), so the caller can try again later."""
     if not file_id:
         return
     try:
         client().files.delete(file_id)
-    except (anthropic.APIError, TypeError):
-        pass  # already gone, offline, or no credentials; nothing for the user to do
+    except anthropic.NotFoundError:
+        pass  # already gone
 
 
 # ---------- cataloguing from a photo ----------

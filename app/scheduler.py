@@ -107,15 +107,20 @@ def period_for(mode: str, today: date) -> tuple[str, date, date]:
     return f"W{monday.isoformat()}", monday, monday + timedelta(days=6)
 
 
+# Completions of task t that count toward its schedule: done by `:today`, and on the item the task is on now.
+# A task moved to another car starts fresh there, rather than carrying over the old car's dates and odometer.
+ON_CURRENT_ITEM = "(c.asset_id IS NULL OR c.asset_id = t.asset_id)"
+COUNTED_COMPLETIONS = f"c.task_id = t.id AND c.done_on <= :today AND {ON_CURRENT_ITEM}"
+LAST_DONE_ON = f"(SELECT MAX(done_on) FROM completions c WHERE {COUNTED_COMPLETIONS})"
+
+
 def all_task_status(conn, today: date) -> list[dict]:
     """Every active task with its score, latest completion and asset."""
     rows = conn.execute(
-        """
+        f"""
         SELECT t.*, a.name AS asset_name, a.category AS asset_category, a.mileage AS asset_mileage,
-               (SELECT MAX(done_on) FROM completions c WHERE c.task_id = t.id AND c.done_on <= :today) AS last_done_on,
-               -- Only readings from the item the task is on now: it may have been moved from another car.
-               (SELECT mileage FROM completions c WHERE c.task_id = t.id AND c.mileage IS NOT NULL AND c.done_on <= :today
-                  AND (c.asset_id IS NULL OR c.asset_id = t.asset_id)
+               {LAST_DONE_ON} AS last_done_on,
+               (SELECT mileage FROM completions c WHERE {COUNTED_COMPLETIONS} AND c.mileage IS NOT NULL
                 ORDER BY done_on DESC, id DESC LIMIT 1) AS last_mileage
         FROM tasks t
         LEFT JOIN assets a ON a.id = t.asset_id
@@ -175,7 +180,10 @@ def get_plan(conn, settings: dict, today: date, regenerate: bool = False, extra:
     statuses = all_task_status(conn, today)
     # Completions count up to today: a preview of an earlier date mustn't see work done after it.
     span = (start.isoformat(), min(end, today).isoformat())
-    done_in_period = {r["task_id"] for r in conn.execute("SELECT task_id FROM completions WHERE done_on BETWEEN ? AND ?", span)}
+    # Like the scores, only work on the item each task is on now counts.
+    on_item = f"JOIN tasks t ON t.id = c.task_id AND {ON_CURRENT_ITEM}"
+    done_in_period = {r["task_id"] for r in conn.execute(
+        f"SELECT c.task_id FROM completions c {on_item} WHERE c.done_on BETWEEN ? AND ?", span)}
 
     saved = [r["task_id"] for r in conn.execute("SELECT task_id FROM plan_items WHERE period = ? ORDER BY rowid", (period,))]
     if regenerate:
@@ -200,7 +208,7 @@ def get_plan(conn, settings: dict, today: date, regenerate: bool = False, extra:
     for task_id in planned:
         task = by_id[task_id]
         done = conn.execute(
-            "SELECT id, done_on FROM completions WHERE task_id = ? AND done_on BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
+            f"SELECT c.id, c.done_on FROM completions c {on_item} WHERE c.task_id = ? AND c.done_on BETWEEN ? AND ? ORDER BY c.id DESC LIMIT 1",
             (task_id, *span),
         ).fetchone()
         items.append({**task, "done": bool(done), "completion_id": done["id"] if done else None})
