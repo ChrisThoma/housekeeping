@@ -1,7 +1,10 @@
 // Housekeeping frontend. Plain JS, no build step.
 // Append ?as_of=YYYY-MM-DD to the page URL to preview the plan for another date.
 
-const AS_OF = new URLSearchParams(location.search).get("as_of");
+const AS_OF = (() => {
+  const v = new URLSearchParams(location.search).get("as_of");
+  return v && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(new Date(v)) ? v : null;
+})();
 const CATEGORIES = {
   appliance: "Appliances",
   home: "Home systems",
@@ -20,7 +23,15 @@ let state = { assets: [], tasks: [], settings: {} };
 
 // ---------- helpers ----------
 
+// Errors are shown as toasts here; callers catch only when they need to undo something.
+class ApiError extends Error {}
+window.addEventListener("unhandledrejection", (e) => { if (e.reason instanceof ApiError) e.preventDefault(); });
+
 async function api(method, path, body) {
+  if (AS_OF && method !== "GET") {
+    toast("This is a preview, so nothing can be changed. Remove ?as_of from the address to go back.", true);
+    throw new ApiError("preview");
+  }
   const url = new URL(path, location.origin);
   if (AS_OF) url.searchParams.set("as_of", AS_OF);
   const isForm = body instanceof FormData;
@@ -36,7 +47,7 @@ async function api(method, path, body) {
       if (data.detail) msg = typeof data.detail === "string" ? data.detail : data.detail.map((d) => d.msg).join("; ");
     } catch {}
     toast(msg, true);
-    throw new Error(msg);
+    throw new ApiError(msg);
   }
   return res.json();
 }
@@ -44,6 +55,10 @@ async function api(method, path, body) {
 // Toasts enter and leave along the same path. Timers pause while the tab is hidden, so nothing expires unseen.
 function toast(msg, isError = false) {
   const stack = $("#toasts");
+  if (stack.showPopover) {
+    if (stack.matches(":popover-open")) stack.hidePopover();
+    stack.showPopover();  // re-showing puts it above any dialog opened since
+  }
   const el = document.createElement("div");
   el.className = "toast" + (isError ? " error" : "");
   el.setAttribute("role", isError ? "alert" : "status");
@@ -91,6 +106,7 @@ function fmtRange(start, end) {
 }
 
 function scheduleText(t) {
+  if (t.recurrence === "once") return t.due_date ? `Once, by ${fmtDate(t.due_date, false)}` : "Once";
   if (t.recurrence === "seasonal") return "Yearly in " + (t.months || "").split(",").map((m) => MONTHS[+m]).join(", ");
   if (t.recurrence === "mileage") {
     const parts = [`Every ${Number(t.mileage_interval).toLocaleString()} mi`];
@@ -107,7 +123,7 @@ function scheduleText(t) {
 // Seasonal scores run 1.0 → 2.0 across their window, so only the last stretch counts as overdue.
 function urgency(t) {
   if (t.score == null) return "";
-  if (t.score >= (t.recurrence === "seasonal" ? 1.8 : 1.15)) return "overdue";
+  if (t.score >= ({ seasonal: 1.8, once: 1.01 }[t.recurrence] ?? 1.15)) return "overdue";
   if (t.score >= 0.85) return "due";
   return "ok";
 }
@@ -127,7 +143,19 @@ function armConfirm(btn, label, action) {
   }, 3000);
 }
 
+// For quick actions: ignore further clicks until the first one finishes.
+async function once(btn, fn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    return await fn();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function busy(btn, label, fn) {
+  if (btn.disabled) return;
   const original = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = `<span class="spinner" aria-hidden="true"></span>${esc(label)}`;
@@ -217,11 +245,11 @@ async function loadPlan(data) {
   list.hidden = !total;
   list.innerHTML = plan.items.map(planRowHTML).join("");
   on(list, "[data-check]", (b) => onCheck(plan, +b.dataset.check, b));
-  on(list, "[data-snooze]", async (b) => {
+  on(list, "[data-snooze]", (b) => once(b, async () => {
     await api("POST", `/api/tasks/${b.dataset.snooze}/snooze?days=7`);
     toast("Snoozed for a week");
     loadPlan();
-  });
+  }));
 
   const empty = $("#plan-empty");
   empty.hidden = total > 0;
@@ -280,19 +308,24 @@ function planRowHTML(t) {
 }
 
 // The check responds on press: the row flips to done right away, then the server catches up.
+// A check stays pending until the list re-renders, so a double tap can't log the task twice.
+const pendingChecks = new Set();
 async function onCheck(plan, taskId, btn) {
+  if (pendingChecks.has(taskId)) return;
   const item = plan.items.find((i) => i.id === taskId);
   const row = btn.closest(".row");
   if (!item.done && item.recurrence === "mileage") return showMileageForm(item);
+  pendingChecks.add(taskId);
   row.classList.toggle("done", !item.done);
   try {
     if (item.done) await api("DELETE", `/api/completions/${item.completion_id}`);
     else await api("POST", "/api/completions", { task_id: taskId });
   } catch {
     row.classList.toggle("done", item.done);
+    pendingChecks.delete(taskId);
     return;
   }
-  setTimeout(loadPlan, 320);   // let the check finish drawing before the list re-renders
+  setTimeout(() => loadPlan().finally(() => pendingChecks.delete(taskId)), 320);   // let the check finish drawing first
 }
 
 function showMileageForm(item) {
@@ -304,23 +337,34 @@ function showMileageForm(item) {
     <label>Odometer <input id="mi-${item.id}" type="number" min="0" inputmode="numeric" placeholder="${item.asset_mileage ?? ""}"></label>
     <label>Notes <input id="notes-${item.id}" placeholder="Shop, oil, cost"></label>
     <button class="btn small" type="submit">Log</button>`;
-  form.addEventListener("submit", async (e) => {
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
-    const mileage = form.querySelector(`#mi-${item.id}`).value;
-    li.classList.add("done");
-    await api("POST", "/api/completions", {
-      task_id: item.id,
-      mileage: mileage ? +mileage : null,
-      notes: form.querySelector(`#notes-${item.id}`).value,
+    once(form.querySelector("button"), async () => {
+      const mileage = form.querySelector(`#mi-${item.id}`).value;
+      li.classList.add("done");
+      try {
+        await api("POST", "/api/completions", {
+          task_id: item.id,
+          mileage: mileage ? +mileage : null,
+          notes: form.querySelector(`#notes-${item.id}`).value,
+        });
+      } catch {
+        li.classList.remove("done");
+        return;
+      }
+      setTimeout(loadPlan, 320);
     });
-    setTimeout(loadPlan, 320);
   });
   li.appendChild(form);
   form.querySelector("input").focus();
 }
 
 $("#plan-regen").addEventListener("click", (e) => busy(e.currentTarget, "Rebuilding", async () => loadPlan(await api("POST", "/api/plan/regenerate"))));
-$("#plan-more").addEventListener("click", async () => loadPlan(await api("POST", "/api/plan/more?n=1")));
+$("#plan-add").addEventListener("click", async () => {
+  state.assets = await api("GET", "/api/assets");  // the item picker needs them; this tab doesn't load them
+  openTaskForm();
+});
+$("#plan-more").addEventListener("click", (e) => once(e.currentTarget, async () => loadPlan(await api("POST", "/api/plan/more?n=1"))));
 
 // ---------- inventory ----------
 
@@ -404,9 +448,13 @@ function toggleMileage() {
 }
 $("#asset-category").addEventListener("change", toggleMileage);
 $("#asset-new").addEventListener("click", () => openAssetForm());
-$("#asset-form").addEventListener("submit", async (e) => {
+$("#asset-form").addEventListener("submit", (e) => {
   e.preventDefault();
+  busy($("#asset-form [type=submit]"), "Saving", saveAsset);
+});
+async function saveAsset() {
   const id = $("#asset-id").value;
+  const scan = scanned;  // closing the dialog resets the scan, so hold on to it
   const body = {
     category: $("#asset-category").value,
     name: $("#asset-name").value.trim(),
@@ -418,27 +466,33 @@ $("#asset-form").addEventListener("submit", async (e) => {
   const saved = await api(id ? "PUT" : "POST", id ? `/api/assets/${id}` : "/api/assets", body);
   closeDialog("asset-dialog");
   toast(id ? "Saved" : `Added ${body.name}`);
-  if (!id && scanned) {
+  if (!id && scan) {
     // Keep the label photo with the item, with what the scan read from it, so suggestions can use it.
     const form = new FormData();
-    form.append("file", scanned.photo, "label.jpg");
+    form.append("file", scan.photo, "label.jpg");
     form.append("asset_id", saved.id);
     form.append("kind", "photo");
     form.append("title", `${body.name} label`);
-    form.append("notes", JSON.stringify(scanned.label_notes));
-    await api("POST", "/api/documents/upload", form).catch(() => {});
+    form.append("notes", JSON.stringify(scan.label_notes));
+    await api("POST", "/api/documents/upload", form).catch(() => toast("Saved, but the label photo couldn't be kept.", true));
   }
-  scanned = null;
   loadInventory();
-});
+}
 
 // ---------- scanning a label ----------
 
 let scanned = null;  // { photo, label_notes } from the last scan, saved with the new item
+let scanSeq = 0;     // bumped whenever the form resets, so a scan that finishes late is ignored
+let scanPreviewURL = null;
 const SCAN_PROMPT = $("#scan-text").innerHTML;
+$("#asset-dialog").addEventListener("close", () => resetScan(false));
 
 function resetScan(show) {
+  scanSeq++;
   scanned = null;
+  $("#scan-file").disabled = false;
+  if (scanPreviewURL) URL.revokeObjectURL(scanPreviewURL);
+  scanPreviewURL = null;
   $("#scan-zone").hidden = !show;
   $("#scan-zone").classList.remove("has-file", "busy");
   $("#scan-text").innerHTML = SCAN_PROMPT;
@@ -457,12 +511,15 @@ async function shrinkPhoto(file, maxSide = 2000) {
   canvas.height = Math.round(bitmap.height * scale);
   canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   bitmap.close();
-  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+  if (!blob) throw new Error("Couldn't encode the photo");
+  return blob;
 }
 
 $("#scan-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  const seq = ++scanSeq;
   const zone = $("#scan-zone");
   let photo;
   try {
@@ -471,9 +528,13 @@ $("#scan-file").addEventListener("change", async (e) => {
     toast("Couldn't open that photo. Try a JPEG or PNG.", true);
     return resetScan(true);
   }
-  $("#scan-preview").src = URL.createObjectURL(photo);
+  if (seq !== scanSeq) return;
+  if (scanPreviewURL) URL.revokeObjectURL(scanPreviewURL);
+  scanPreviewURL = URL.createObjectURL(photo);
+  $("#scan-preview").src = scanPreviewURL;
   $("#scan-preview").hidden = false;
   zone.classList.add("busy");
+  $("#scan-file").disabled = true;
   $("#scan-text").innerHTML = `<span class="spinner" aria-hidden="true"></span> Reading the label…`;
   const form = new FormData();
   form.append("file", photo, "label.jpg");
@@ -481,10 +542,12 @@ $("#scan-file").addEventListener("change", async (e) => {
   try {
     r = await api("POST", "/api/assets/scan", form);
   } catch {
-    return resetScan(true);
-  } finally {
-    zone.classList.remove("busy");
+    if (seq === scanSeq) resetScan(true);
+    return;
   }
+  if (seq !== scanSeq) return;  // the dialog was closed or reset while Claude was reading
+  zone.classList.remove("busy");
+  $("#scan-file").disabled = false;
   scanned = { photo, label_notes: r.label_notes };
   zone.classList.add("has-file");
   $("#scan-text").innerHTML = `<strong>${esc(r.details || r.name)}</strong><br>Read from the photo. Choose another to scan again.`;
@@ -645,7 +708,10 @@ const openTaskById = (b) => openTaskForm(state.tasks.find((t) => t.id === +b.dat
 async function loadTasks() {
   [state.tasks, state.assets] = await Promise.all([api("GET", "/api/tasks"), api("GET", "/api/assets")]);
   const suggested = state.tasks.filter((t) => t.status === "suggested");
-  const active = state.tasks.filter((t) => t.status === "active").sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  // One-off tasks leave the active list once they're done.
+  const finishedOnce = (t) => t.recurrence === "once" && t.last_done_on;
+  const active = state.tasks.filter((t) => t.status === "active" && !finishedOnce(t)).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const finished = state.tasks.filter((t) => t.status === "active" && finishedOnce(t)).sort((a, b) => b.last_done_on.localeCompare(a.last_done_on));
   const paused = state.tasks.filter((t) => t.status === "paused");
   refreshBadge(suggested.length);
 
@@ -653,24 +719,29 @@ async function loadTasks() {
   $("#suggested-wrap").hidden = !suggested.length;
   $("#suggested-count").textContent = suggested.length;
   sList.innerHTML = suggested.map(suggestionRowHTML).join("");
-  on(sList, "[data-approve]", async (b) => {
+  on(sList, "[data-approve]", (b) => once(b, async () => {
     await api("POST", `/api/tasks/${b.dataset.approve}/approve`, { last_done_on: $(`#last-${b.dataset.approve}`).value || null });
     loadTasks();
-  });
-  on(sList, "[data-dismiss]", async (b) => {
+  }));
+  on(sList, "[data-dismiss]", (b) => once(b, async () => {
     await api("DELETE", `/api/tasks/${b.dataset.dismiss}`);
     loadTasks();
-  });
+  }));
   on(sList, "[data-edit-task]", openTaskById);
   $("#approve-all-wrap").innerHTML = suggested.length > 1 ? `<button class="btn secondary small" id="approve-all">Approve all ${suggested.length}</button>` : "";
   if (suggested.length > 1) {
     $("#approve-all").addEventListener("click", (e) =>
       busy(e.currentTarget, "Approving", async () => {
-        for (const t of suggested) {
-          await api("POST", `/api/tasks/${t.id}/approve`, { last_done_on: $(`#last-${t.id}`).value || null });
+        let approved = 0;
+        try {
+          for (const t of suggested) {
+            await api("POST", `/api/tasks/${t.id}/approve`, { last_done_on: $(`#last-${t.id}`).value || null });
+            approved++;
+          }
+          toast(`Approved ${plural(approved, "task")}`);
+        } finally {
+          loadTasks();  // show what was approved before any failure
         }
-        toast(`Approved ${plural(suggested.length, "task")}`);
-        loadTasks();
       })
     );
   }
@@ -681,16 +752,19 @@ async function loadTasks() {
     : `<li class="empty-row">No active tasks yet. Approve a suggestion or add your own.</li>`;
   $("#paused-wrap").hidden = !paused.length;
   $("#paused-list").innerHTML = paused.map((t) => taskRowHTML(t, true)).join("");
+  $("#finished-wrap").hidden = !finished.length;
+  $("#finished-count").textContent = finished.length;
+  $("#finished-list").innerHTML = finished.map(finishedRowHTML).join("");
 
   const tab = $("#tab-tasks");
   on(tab, "#task-list [data-edit-task], #paused-list [data-edit-task]", openTaskById);
-  on(tab, "[data-pause]", async (b) => { await api("POST", `/api/tasks/${b.dataset.pause}/status/paused`); loadTasks(); });
-  on(tab, "[data-resume]", async (b) => { await api("POST", `/api/tasks/${b.dataset.resume}/status/active`); loadTasks(); });
-  on(tab, "[data-done-now]", async (b) => {
+  on(tab, "[data-pause]", (b) => once(b, async () => { await api("POST", `/api/tasks/${b.dataset.pause}/status/paused`); loadTasks(); }));
+  on(tab, "[data-resume]", (b) => once(b, async () => { await api("POST", `/api/tasks/${b.dataset.resume}/status/active`); loadTasks(); }));
+  on(tab, "[data-done-now]", (b) => once(b, async () => {
     await api("POST", "/api/completions", { task_id: +b.dataset.doneNow });
     toast("Logged for today");
     loadTasks();
-  });
+  }));
   on(tab, "[data-del-task]", (b) => armConfirm(b, "Delete?", async () => { await api("DELETE", `/api/tasks/${b.dataset.delTask}`); loadTasks(); }));
 }
 
@@ -711,6 +785,19 @@ function suggestionRowHTML(t) {
     </li>`;
 }
 
+function finishedRowHTML(t) {
+  return `
+    <li class="row" tabindex="-1">
+      <div class="row-main">
+        <div class="row-title">${esc(t.title)}</div>
+        <div class="row-meta">${esc(meta([t.asset_name || "Whole home", `Done ${fmtDate(t.last_done_on)}`]))}</div>
+      </div>
+      <div class="row-actions">
+        <button class="btn quiet small icon danger reveal" data-del-task="${t.id}" aria-label="Delete ${esc(t.title)}">${ic("trash")}</button>
+      </div>
+    </li>`;
+}
+
 function taskRowHTML(t, paused) {
   const u = paused ? "" : urgency(t);
   return `
@@ -725,7 +812,7 @@ function taskRowHTML(t, paused) {
              <button class="btn quiet small" data-resume="${t.id}">Resume</button>`
           : `<button class="btn quiet small icon reveal" data-edit-task="${t.id}" aria-label="Edit ${esc(t.title)}">${ic("edit")}</button>
              <button class="btn quiet small reveal" data-pause="${t.id}">Pause</button>
-             <button class="btn quiet small reveal" data-done-now="${t.id}">Done today</button>
+             <button class="btn quiet small reveal" data-done-now="${t.id}">${t.recurrence === "once" ? "Done" : "Done today"}</button>
              <span class="status ${u === "ok" ? "" : u}"><span class="dot ${u}"></span>${esc(t.reason || "")}</span>`}
       </div>
     </li>`;
@@ -741,7 +828,8 @@ function openTaskForm(t = {}) {
   $("#task-title").value = t.title ?? "";
   $("#task-description").value = t.description ?? "";
   $("#task-asset").value = t.asset_id ?? "";
-  $("#task-recurrence").value = t.recurrence ?? "interval";
+  $("#task-recurrence").value = t.recurrence ?? "once";
+  $("#task-due").value = t.due_date ?? "";
   $("#task-interval").value = t.interval_days ?? "";
   $("#task-months").value = t.months ?? "";
   $("#task-mileage").value = t.mileage_interval ?? "";
@@ -756,8 +844,11 @@ function toggleRecurrence() {
 }
 $("#task-recurrence").addEventListener("change", toggleRecurrence);
 $("#task-new").addEventListener("click", () => openTaskForm());
-$("#task-form").addEventListener("submit", async (e) => {
+$("#task-form").addEventListener("submit", (e) => {
   e.preventDefault();
+  busy($("#task-form [type=submit]"), "Saving", saveTask);
+});
+async function saveTask() {
   const id = $("#task-id").value;
   const num = (sel) => ($(sel).value ? +$(sel).value : null);
   const rec = $("#task-recurrence").value;
@@ -766,7 +857,8 @@ $("#task-form").addEventListener("submit", async (e) => {
     title: $("#task-title").value.trim(),
     description: $("#task-description").value.trim(),
     recurrence: rec,
-    interval_days: rec === "seasonal" ? null : num("#task-interval"),
+    interval_days: rec === "seasonal" || rec === "once" ? null : num("#task-interval"),
+    due_date: rec === "once" ? $("#task-due").value || null : null,
     months: rec === "seasonal" ? $("#task-months").value.trim() : null,
     mileage_interval: rec === "mileage" ? num("#task-mileage") : null,
     priority: +$("#task-priority").value,
@@ -774,11 +866,12 @@ $("#task-form").addEventListener("submit", async (e) => {
     status: $("#task-status").value,
     source: $("#task-source").value,
   };
-  await api(id ? "PUT" : "POST", id ? `/api/tasks/${id}` : "/api/tasks", body);
+  const r = await api(id ? "PUT" : "POST", id ? `/api/tasks/${id}` : "/api/tasks", body);
   closeDialog("task-dialog");
-  toast("Saved");
-  loadTasks();
-});
+  toast(r.planned ? "Added to your plan" : "Saved");
+  if (!$("#tab-plan").hidden) loadPlan();
+  else loadTasks();
+}
 
 $("#guide-open").addEventListener("click", () => { openDialog("guide-dialog"); $("#guide-text").focus(); });
 $("#guide-form").addEventListener("submit", (e) => {
@@ -897,7 +990,8 @@ $("#banner-close").addEventListener("click", () => {
   try { localStorage.setItem("hk-banner-dismissed", "1"); } catch {}
 });
 
-$("#today-label").textContent = (AS_OF ? "Previewing " : "") + fmtDate(todayISO(), false);
+$("#today-label").textContent = (AS_OF ? "Preview of " : "") + fmtDate(todayISO(), false);
+if (new URLSearchParams(location.search).has("as_of") && !AS_OF) toast("The as_of date should look like 2026-11-20, so showing today.", true);
 loadStatus();
 refreshBadge();
 const startTab = location.hash.slice(1);

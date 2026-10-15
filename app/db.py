@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     asset_id         INTEGER REFERENCES assets(id) ON DELETE CASCADE,
     title            TEXT NOT NULL,
     description      TEXT DEFAULT '',
-    recurrence       TEXT NOT NULL,      -- interval | seasonal | mileage
+    recurrence       TEXT NOT NULL,      -- interval | seasonal | mileage | once
     interval_days    INTEGER,            -- interval, or time cap for mileage tasks
     months           TEXT,               -- seasonal: comma-separated months, e.g. "10,11"
     mileage_interval INTEGER,            -- mileage
@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS plan_items (
 );
 """
 
+# Changes to the schema after 0.1.0, applied in order. PRAGMA user_version records how many have run,
+# so a database from any earlier version is brought up to date on startup. Only ever append to this list.
+MIGRATIONS = [
+    # 1: remember the odometer a completion replaced, so undoing it can put the old reading back.
+    "ALTER TABLE completions ADD COLUMN prev_asset_mileage INTEGER",
+    # 2: one-off tasks (recurrence 'once') can have a deadline.
+    "ALTER TABLE tasks ADD COLUMN due_date TEXT",
+]
+
 DEFAULT_SETTINGS = {
     "location": "",
     "climate_notes": "",       # e.g. "USDA zone 6b, humid, snowy winters"
@@ -97,9 +106,22 @@ def connect():
 
 
 def init():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with connect() as conn:
+            conn.execute("SELECT 1")
+    except (OSError, sqlite3.OperationalError) as e:
+        raise SystemExit(
+            f"Housekeeping can't open its database at {DB_PATH}: {e}\n"
+            f"Check that the folder exists and is writable by this user (uid {os.getuid()}). "
+            "With Docker and a bind mount, run: sudo chown -R 1000:1000 <your data folder>"
+        )
     with connect() as conn:
         conn.executescript(SCHEMA)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        for i, statement in enumerate(MIGRATIONS[version:], version + 1):
+            conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {i}")
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 

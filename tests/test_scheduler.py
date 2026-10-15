@@ -52,7 +52,13 @@ def client(tmp_path, monkeypatch):
     return TestClient(main.app)
 
 
-def test_plan_end_to_end(client):
+def set_today(monkeypatch, d: str):
+    from app import main
+    monkeypatch.setattr(main, "clock", lambda: date.fromisoformat(d))
+
+
+def test_plan_end_to_end(client, monkeypatch):
+    set_today(monkeypatch, "2026-10-13")
     client.put("/api/settings", json={"plan_mode": "weekly", "plan_count": "2"})
     car = client.post("/api/assets", json={"category": "vehicle", "name": "CR-V", "year": 2019, "mileage": 45000}).json()
     ids = []
@@ -64,29 +70,35 @@ def test_plan_end_to_end(client):
     ]:
         ids.append(client.post("/api/tasks", json={"title": title, **extra}).json()["id"])
 
-    plan = client.get("/api/plan?as_of=2026-10-13").json()
+    plan = client.get("/api/plan").json()
     assert plan["period"] == "W2026-10-12"
     titles = [i["title"] for i in plan["items"]]
     assert set(titles) == {"Clean gutters", "Oil change"}  # in-season + high priority beat low priority
     assert plan["backlog_count"] == 1  # smoke alarms; tulips are out of season
 
     # Same plan on another day this week.
-    assert [i["id"] for i in client.get("/api/plan?as_of=2026-10-15").json()["items"]] == [i["id"] for i in plan["items"]]
+    set_today(monkeypatch, "2026-10-15")
+    assert [i["id"] for i in client.get("/api/plan").json()["items"]] == [i["id"] for i in plan["items"]]
 
     # Log the oil change with an odometer reading; it stays in the plan as done and updates the car.
-    client.post("/api/completions?as_of=2026-10-14", json={"task_id": ids[0], "mileage": 45200})
-    plan = client.get("/api/plan?as_of=2026-10-14").json()
+    set_today(monkeypatch, "2026-10-14")
+    client.post("/api/completions", json={"task_id": ids[0], "mileage": 45200})
+    plan = client.get("/api/plan").json()
     assert {i["title"]: i["done"] for i in plan["items"]} == {"Oil change": True, "Clean gutters": False}
     assert client.get("/api/assets").json()[0]["mileage"] == 45200
 
     # Snoozing gutters frees the slot, which the smoke alarm test takes.
-    client.post(f"/api/tasks/{ids[1]}/snooze?days=7&as_of=2026-10-14")
-    titles = [i["title"] for i in client.get("/api/plan?as_of=2026-10-14").json()["items"]]
+    client.post(f"/api/tasks/{ids[1]}/snooze?days=7")
+    titles = [i["title"] for i in client.get("/api/plan").json()["items"]]
     assert set(titles) == {"Oil change", "Test smoke alarms"}
 
-    # Next week gets a fresh plan; the oil change isn't due again.
+    # Previewing next week shows a fresh plan without the oil change, and saves nothing.
     nxt = client.get("/api/plan?as_of=2026-10-21").json()
-    assert "Oil change" not in [i["title"] for i in nxt["items"]]
+    assert nxt["period"] == "W2026-10-19" and "Oil change" not in [i["title"] for i in nxt["items"]]
+    from app import db as _db
+    with _db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM plan_items WHERE period = 'W2026-10-19'").fetchone()[0] == 0
+    assert client.post("/api/plan/regenerate?as_of=2026-10-21").status_code == 400
 
 
 def test_suggested_tasks_wait_for_approval(client):
@@ -100,3 +112,38 @@ def test_suggested_tasks_wait_for_approval(client):
 def test_bad_task_rejected(client):
     r = client.post("/api/tasks", json={"title": "x", "recurrence": "seasonal", "months": ""})
     assert r.status_code == 400
+
+
+def test_one_off_deadlines():
+    t = {"recurrence": "once", "due_date": "2026-10-20"}
+    at = lambda d, last=None: scheduler.evaluate(t, last, None, date.fromisoformat(d))
+    assert at("2026-10-01")["score"] < 0.85                       # weeks away: not due yet
+    assert at("2026-10-13") == {"score": 0.85, "reason": "Due in 7 days", "due_on": "2026-10-20"}  # a week ahead: due
+    assert at("2026-10-20")["reason"] == "Due today" and at("2026-10-20")["score"] == 1.0
+    assert at("2026-10-27")["score"] == 1.5 and at("2026-10-27")["reason"] == "7 days past its deadline"
+    assert at("2027-01-01")["score"] == 2.0                        # lateness is capped
+    assert at("2026-10-25", {"done_on": "2026-10-19"})["score"] == 0  # done once, done for good
+    assert scheduler.evaluate({"recurrence": "once"}, None, None, date(2026, 10, 13))["reason"] == "No deadline"
+
+
+def test_one_off_tasks_join_a_full_plan_and_leave_when_done(client, monkeypatch):
+    set_today(monkeypatch, "2026-10-13")
+    client.put("/api/settings", json={"plan_mode": "weekly", "plan_count": "1"})
+    client.post("/api/tasks", json={"title": "Test smoke alarms", "recurrence": "interval", "interval_days": 30})
+    assert len(client.get("/api/plan").json()["items"]) == 1  # the plan is full
+
+    fence = client.post("/api/tasks", json={"title": "Fix fence gate", "recurrence": "once", "due_date": "2026-10-16",
+                                            "interval_days": 30}).json()
+    assert fence["planned"] and fence["interval_days"] is None
+    later = client.post("/api/tasks", json={"title": "Paint shed", "recurrence": "once", "due_date": "2026-12-01"}).json()
+    assert not later["planned"]
+    plan = client.get("/api/plan").json()
+    assert [i["title"] for i in plan["items"]] == ["Test smoke alarms", "Fix fence gate"]
+
+    client.post("/api/completions", json={"task_id": fence["id"]})
+    assert {i["title"]: i["done"] for i in client.get("/api/plan").json()["items"]}["Fix fence gate"] is True
+    set_today(monkeypatch, "2026-10-20")
+    assert "Fix fence gate" not in [i["title"] for i in client.get("/api/plan").json()["items"]]
+    # Deadlines only apply to one-off tasks.
+    r = client.post("/api/tasks", json={"title": "x", "recurrence": "interval", "interval_days": 7, "due_date": "2026-11-01"}).json()
+    assert r["due_date"] is None

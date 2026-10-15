@@ -69,7 +69,7 @@ def test_pdf_info_reads_text():
 
 def test_upload_read_and_use_in_suggestions(client, monkeypatch):
     seen = {}
-    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset: (NOTES, "full", "file_abc"))
+    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset, **kw: (NOTES, "full", "file_abc"))
     def fake_suggest(asset, existing, settings, today, doc_notes=None):
         seen["notes"] = doc_notes
         return []
@@ -92,7 +92,7 @@ def test_upload_read_and_use_in_suggestions(client, monkeypatch):
 
 
 def test_document_kept_when_reading_fails(client, monkeypatch):
-    def fail(*a):
+    def fail(*a, **kw):
         raise RuntimeError("Claude declined this request.")
     monkeypatch.setattr(ai, "read_document", fail)
     r = client.post("/api/documents/upload", files={"file": ("guide.txt", b"Monthly: test GFCI outlets\n" * 20, "text/plain")}).json()
@@ -115,7 +115,7 @@ def test_find_documents_downloads_and_reads(client, monkeypatch):
             raise documents.DocumentError("The site returned an error (404) for that link.")
         return make_pdf(["Oil every 7,500 miles"]), "application/pdf", "crv.pdf"
     monkeypatch.setattr(documents, "download", fake_download)
-    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset: (NOTES, "full", None))
+    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset, **kw: (NOTES, "full", None))
 
     car = client.post("/api/assets", json={"category": "vehicle", "name": "CR-V", "year": 2019}).json()
     r = client.post(f"/api/assets/{car['id']}/find-documents").json()
@@ -140,7 +140,7 @@ def test_found_documents_without_care_instructions_are_dropped(client, monkeypat
     monkeypatch.setattr(documents, "download", lambda url: (make_pdf(["x"]), "application/pdf", url.rsplit("/", 1)[1]))
     spec = NOTES.model_copy(update={"document_type": "Spec sheet", "maintenance": []})
     forgotten = []
-    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset: (spec if "spec" in doc["filename"] else NOTES, "full", f"file_{doc['id']}"))
+    monkeypatch.setattr(ai, "read_document", lambda doc, path, asset, **kw: (spec if "spec" in doc["filename"] else NOTES, "full", f"file_{doc['id']}"))
     monkeypatch.setattr(ai, "forget_file", forgotten.append)
 
     dw = client.post("/api/assets", json={"category": "appliance", "name": "Dishwasher"}).json()

@@ -7,7 +7,9 @@ services:
     container_name: housekeeping
     restart: unless-stopped
     ports:
-      - "${PORT:-8000}:8000"
+      # Only this computer can reach it by default. To open it to your network, set HOST=0.0.0.0
+      # in .env, and set HOUSEKEEPING_PASSWORD too.
+      - "${HOST:-127.0.0.1}:${PORT:-8000}:8000"
     env_file:
       - path: .env
         required: false

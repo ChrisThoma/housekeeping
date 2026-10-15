@@ -3,12 +3,13 @@
 Every active task gets an urgency score:
   < 0.85  not due yet
   ~1.0    due now (or never logged)
-  > 1.0   overdue; seasonal tasks climb toward 2.0 as their window closes
+  > 1.0   overdue; seasonal tasks climb toward 2.0 as their window closes, one-off tasks as their deadline passes
 """
 import calendar
 from datetime import date, timedelta
 
 DUE_THRESHOLD = 0.85
+DEADLINE_LEAD_DAYS = 7  # a one-off task with a deadline comes due this many days before it
 PRIORITY_WEIGHT = {1: 1.3, 2: 1.0, 3: 0.8}
 
 
@@ -44,6 +45,21 @@ def evaluate(task: dict, last: dict | None, asset: dict | None, today: date) -> 
     last_on = date.fromisoformat(last["done_on"]) if last else None
     kind = task["recurrence"]
 
+    if kind == "once":
+        if last_on:
+            return {"score": 0.0, "reason": f"Done {last_on}", "due_on": None}
+        if not task.get("due_date"):
+            return {"score": 1.0, "reason": "No deadline", "due_on": None}
+        deadline = date.fromisoformat(task["due_date"])
+        left = (deadline - today).days
+        if left > 0:
+            score = max(0.0, 1.0 - (1.0 - DUE_THRESHOLD) * left / DEADLINE_LEAD_DAYS)
+            reason = "Due tomorrow" if left == 1 else f"Due in {left} days"
+        else:
+            score = 1.0 + min(-left, 14) / 14
+            reason = "Due today" if left == 0 else f"{-left} day{'s' if left != -1 else ''} past its deadline"
+        return {"score": score, "reason": reason, "due_on": deadline.isoformat()}
+
     if kind == "seasonal":
         months = parse_months(task.get("months"))
         if today.month not in months:
@@ -71,8 +87,10 @@ def evaluate(task: dict, last: dict | None, asset: dict | None, today: date) -> 
         scores.append(driven / task["mileage_interval"])
         reasons.append(f"{driven:,} mi since last (every {task['mileage_interval']:,})")
 
-    if not scores:
-        return {"score": 1.0, "reason": "Needs a mileage reading", "due_on": None}
+    if not scores:  # a mileage task with no time cap and no odometer readings: check on it yearly
+        elapsed = (today - last_on).days
+        return {"score": elapsed / 365, "reason": f"{elapsed}d since last; log the odometer to track miles",
+                "due_on": (last_on + timedelta(days=365)).isoformat()}
 
     i = max(range(len(scores)), key=lambda j: scores[j])
     return {
@@ -94,11 +112,11 @@ def all_task_status(conn, today: date) -> list[dict]:
     rows = conn.execute(
         """
         SELECT t.*, a.name AS asset_name, a.category AS asset_category, a.mileage AS asset_mileage,
-               c.done_on AS last_done_on, c.mileage AS last_mileage
+               (SELECT MAX(done_on) FROM completions c WHERE c.task_id = t.id) AS last_done_on,
+               (SELECT mileage FROM completions c WHERE c.task_id = t.id AND c.mileage IS NOT NULL
+                ORDER BY done_on DESC, id DESC LIMIT 1) AS last_mileage
         FROM tasks t
         LEFT JOIN assets a ON a.id = t.asset_id
-        LEFT JOIN completions c ON c.id = (
-            SELECT id FROM completions WHERE task_id = t.id ORDER BY done_on DESC, id DESC LIMIT 1)
         WHERE t.status = 'active'
         """
     ).fetchall()
@@ -115,58 +133,75 @@ def all_task_status(conn, today: date) -> list[dict]:
     return out
 
 
-def _fill(conn, period: str, start: date, end: date, statuses: list[dict], count: int):
-    # Only active tasks count toward the plan size, so pausing one frees its slot.
-    active_ids = {t["id"] for t in statuses}
-    planned = {r["task_id"] for r in conn.execute("SELECT task_id FROM plan_items WHERE period = ?", (period,))} & active_ids
-    done_in_period = {
-        r["task_id"]
-        for r in conn.execute(
-            "SELECT task_id FROM completions WHERE done_on BETWEEN ? AND ?", (start.isoformat(), end.isoformat())
-        )
-    }
+def _pick(statuses: list[dict], planned: list[int], done_in_period: set[int], count: int) -> list[int]:
+    """The most urgent due tasks that would bring the plan up to `count`."""
+    taken, picks = set(planned), []
     for t in statuses:
-        if len(planned) >= count:
+        if len(taken) >= count:
             break
-        if t["score"] < DUE_THRESHOLD or t["id"] in planned or t["id"] in done_in_period:
+        if t["score"] < DUE_THRESHOLD or t["id"] in taken or t["id"] in done_in_period:
             continue
-        conn.execute("INSERT INTO plan_items (period, task_id) VALUES (?, ?)", (period, t["id"]))
-        planned.add(t["id"])
+        picks.append(t["id"])
+        taken.add(t["id"])
+    return picks
 
 
-def get_plan(conn, settings: dict, today: date, regenerate: bool = False, extra: int = 0) -> dict:
+def add_if_due(conn, settings: dict, today: date, task_id: int) -> bool:
+    """Put a task you just created into the current plan if it's already due, even when the plan is full."""
+    period, start, end = period_for(settings.get("plan_mode", "weekly"), today)
+    task = next((t for t in all_task_status(conn, today) if t["id"] == task_id), None)
+    if not task or task["score"] < DUE_THRESHOLD:
+        return False
+    get_plan(conn, settings, today)  # make sure this period's plan exists first, so the task is an addition to it
+    conn.execute("INSERT OR IGNORE INTO plan_items (period, task_id) VALUES (?, ?)", (period, task_id))
+    return True
+
+
+def plan_size(settings: dict) -> int:
+    try:
+        return max(1, int(settings.get("plan_count") or 5))
+    except ValueError:
+        return 5
+
+
+def get_plan(conn, settings: dict, today: date, regenerate: bool = False, extra: int = 0, persist: bool = True) -> dict:
+    """The plan for the period containing `today`. With persist=False (a preview), nothing is saved."""
     mode = settings.get("plan_mode", "weekly")
-    count = int(settings.get("plan_count") or 5)
+    count = plan_size(settings)
     period, start, end = period_for(mode, today)
     statuses = all_task_status(conn, today)
+    span = (start.isoformat(), end.isoformat())
+    done_in_period = {r["task_id"] for r in conn.execute("SELECT task_id FROM completions WHERE done_on BETWEEN ? AND ?", span)}
 
+    saved = [r["task_id"] for r in conn.execute("SELECT task_id FROM plan_items WHERE period = ? ORDER BY rowid", (period,))]
     if regenerate:
         # Keep anything already checked off; replace the rest.
-        conn.execute(
-            """DELETE FROM plan_items WHERE period = ? AND task_id NOT IN
-               (SELECT task_id FROM completions WHERE done_on BETWEEN ? AND ?)""",
-            (period, start.isoformat(), end.isoformat()),
-        )
-    # Top up to the plan size; this also refills slots freed by snoozing or pausing.
-    _fill(conn, period, start, end, statuses, count)
-    if extra:
-        active_ids = {t["id"] for t in statuses}
-        current = sum(1 for r in conn.execute("SELECT task_id FROM plan_items WHERE period = ?", (period,)) if r["task_id"] in active_ids)
-        _fill(conn, period, start, end, statuses, current + extra)
-
+        saved = [i for i in saved if i in done_in_period]
+        if persist:
+            conn.execute(f"DELETE FROM plan_items WHERE period = ? AND task_id NOT IN ({','.join('?' * len(saved)) or 'NULL'})",
+                         (period, *saved))
+    # Only active tasks count toward the plan size, so pausing or snoozing one frees its slot for the top-up.
     by_id = {t["id"]: t for t in statuses}
+    planned = [i for i in saved if i in by_id]
+    added = _pick(statuses, planned, done_in_period, count)
+    planned += added
+    if extra:
+        more = _pick(statuses, planned, done_in_period, len(planned) + extra)
+        planned += more
+        added += more
+    if persist:
+        conn.executemany("INSERT OR IGNORE INTO plan_items (period, task_id) VALUES (?, ?)", [(period, i) for i in added])
+
     items = []
-    for r in conn.execute("SELECT task_id FROM plan_items WHERE period = ? ORDER BY rowid", (period,)):
-        task = by_id.get(r["task_id"])
-        if not task:  # paused or deleted since planning
-            continue
+    for task_id in planned:
+        task = by_id[task_id]
         done = conn.execute(
             "SELECT id, done_on FROM completions WHERE task_id = ? AND done_on BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
-            (task["id"], start.isoformat(), end.isoformat()),
+            (task_id, *span),
         ).fetchone()
         items.append({**task, "done": bool(done), "completion_id": done["id"] if done else None})
 
-    planned_ids = {i["id"] for i in items}
+    planned_ids = set(planned)
     backlog = [t for t in statuses if t["score"] >= DUE_THRESHOLD and t["id"] not in planned_ids]
     return {
         "period": period,

@@ -69,6 +69,7 @@
         <p class="page-sub" id="plan-sub"></p>
       </div>
       <div class="actions no-print">
+        <button class="btn quiet small" id="plan-add">Add task</button>
         <button class="btn quiet small" id="plan-more">Add one more</button>
         <button class="btn quiet small" id="plan-regen">Rebuild</button>
       </div>
@@ -114,7 +115,7 @@
     <div class="page-head">
       <div>
         <h1>Tasks</h1>
-        <p class="page-sub">The recurring jobs your plan is built from.</p>
+        <p class="page-sub">The recurring jobs and one-off tasks your plan is built from.</p>
       </div>
       <div class="actions">
         <button class="btn secondary small" id="guide-open">Import a checklist</button>
@@ -132,6 +133,10 @@
     <div id="paused-wrap" hidden>
       <h2 class="section-title">Paused</h2>
       <ul class="list" id="paused-list"></ul>
+    </div>
+    <div id="finished-wrap" hidden>
+      <h2 class="section-title">Done <span class="count" id="finished-count"></span></h2>
+      <ul class="list" id="finished-list"></ul>
     </div>
   </section>
 
@@ -277,13 +282,16 @@
       <label class="span2">Title <input id="task-title" required placeholder="Replace HVAC filter"></label>
       <label class="span2">Notes <input id="task-description" placeholder="How, or why it matters"></label>
       <label>For <select id="task-asset"></select></label>
-      <label>Repeats
+      <label>Schedule
         <select id="task-recurrence">
+          <option value="once">One time</option>
           <option value="interval">Every few days</option>
           <option value="seasonal">Yearly, in certain months</option>
           <option value="mileage">By mileage</option>
         </select>
       </label>
+      <label data-rec="once">Deadline <input id="task-due" type="date" aria-describedby="task-due-hint"></label>
+      <p class="hint span2" id="task-due-hint" data-rec="once">Optional. It joins your plan the week before.</p>
       <label data-rec="interval mileage">Every (days) <input id="task-interval" type="number" min="1" inputmode="numeric" placeholder="90"></label>
       <label data-rec="seasonal">Months <input id="task-months" placeholder="10,11"></label>
       <label data-rec="mileage">Every (miles) <input id="task-mileage" type="number" min="1" inputmode="numeric" placeholder="5000"></label>
@@ -299,7 +307,7 @@
   </form>
 </dialog>
 
-<div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="toasts" id="toasts" popover="manual" aria-live="polite"></div>
 
 <script src="/static/app.js"></script>
 </body>

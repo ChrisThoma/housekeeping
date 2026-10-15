@@ -240,7 +240,8 @@ a.row-title { color: inherit; }
 .modal .form-actions { margin-top: 4px; }
 
 /* ---------- toasts: enter and leave along the same path ---------- */
-.toasts { position: fixed; z-index: 60; left: 50%; bottom: calc(24px + var(--nav-h) + env(safe-area-inset-bottom, 0px)); translate: -50% 0; display: grid; justify-items: center; gap: 8px; width: max-content; max-width: calc(100% - 32px); pointer-events: none; }
+/* A manual popover, so toasts can sit above an open dialog (both live in the top layer). */
+.toasts { position: fixed; z-index: 60; inset: auto; margin: 0; padding: 0; border: 0; background: none; color: inherit; overflow: visible; left: 50%; bottom: calc(24px + var(--nav-h) + env(safe-area-inset-bottom, 0px)); translate: -50% 0; display: grid; justify-items: center; gap: 8px; width: max-content; max-width: calc(100% - 32px); pointer-events: none; }
 .toast { padding: 10px 14px; border-radius: var(--radius); background: var(--primary); color: var(--primary-ink); box-shadow: var(--ring-raised); font-size: 0.875rem; pointer-events: auto; transition: opacity 200ms ease, transform 300ms var(--ease-out); }
 @starting-style { .toast { opacity: 0; transform: translateY(12px); } }
 .toast.leaving { opacity: 0; transform: translateY(12px); transition-duration: 150ms; }
@@ -267,8 +268,6 @@ a.row-title { color: inherit; }
   .row-actions .status { margin-left: 0; order: -1; flex-basis: 100%; }
   .about .row { grid-template-columns: 110px minmax(0, 1fr); }
   /* Phones: a row's secondary actions appear when you tap the row, instead of crowding every row. */
-  .row .reveal { display: none; }
-  .row:focus-within .reveal { display: inline-flex; }
   .row:focus { outline: none; }
   .suggestion-foot { justify-content: flex-end; }
   .suggestion-foot label { flex-basis: 100%; }
@@ -279,8 +278,12 @@ a.row-title { color: inherit; }
 }
 
 /* Reduced motion: keep the fades that explain state, drop movement. */
+/* Hidden visually rather than with display: none, so keyboard users can still Tab to them, which reveals them. */
+@media (max-width: 720px) and (not ((hover: hover) and (pointer: fine))) {
+  .row:not(:focus-within) .reveal { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 @media (max-width: 720px) and (hover: hover) and (pointer: fine) {
-  .row:hover .reveal { display: inline-flex; }
+  .row:not(:focus-within):not(:hover) .reveal { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .modal, .modal[open], .toast, .toast.leaving { transform: none !important; }

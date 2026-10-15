@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from . import documents
 
-MODEL = os.environ.get("HOUSEKEEPING_MODEL", "claude-opus-5-5")
+MODEL = os.environ.get("HOUSEKEEPING_MODEL") or "claude-opus-5-5"
 FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 FULL_READ_MAX_PAGES = 100   # longer PDFs are sent as extracted text to keep reads affordable
 MAX_TEXT_CHARS = 1_500_000  # roughly 400k tokens
@@ -174,11 +174,12 @@ Don't add maintenance the document doesn't mention. If it's a photo of a data pl
 and manufacture date and anything printed about service or filters."""
 
 
-def document_block(doc: dict, path: Path) -> tuple[dict, str, str | None]:
+def document_block(doc: dict, path: Path, on_upload=None) -> tuple[dict, str, str | None]:
     """Build the content block Claude reads for a stored document.
 
     Returns (block, read_mode, files_api_id). PDFs up to FULL_READ_MAX_PAGES and images go through the Files API
-    so Claude sees layout, tables and diagrams; longer PDFs and web pages go as text.
+    so Claude sees layout, tables and diagrams; longer PDFs and web pages go as text. on_upload(file_id) is called
+    as soon as a file is uploaded, so the id is recorded (and can be deleted later) even if reading then fails.
     """
     mime, title = doc["mime"], doc["title"]
     file_id = doc.get("anthropic_file_id")
@@ -187,6 +188,8 @@ def document_block(doc: dict, path: Path) -> tuple[dict, str, str | None]:
         nonlocal file_id
         if not file_id:
             file_id = client().files.upload(file=(doc["filename"], path.read_bytes(), mime)).id
+            if on_upload:
+                on_upload(file_id)
         return file_id
 
     if mime.startswith("image/"):
@@ -210,8 +213,8 @@ def document_block(doc: dict, path: Path) -> tuple[dict, str, str | None]:
     return block, "text", file_id
 
 
-def read_document(doc: dict, path: Path, asset: dict | None) -> tuple[DocNotes, str, str | None]:
-    block, mode, file_id = document_block(doc, path)
+def read_document(doc: dict, path: Path, asset: dict | None, on_upload=None) -> tuple[DocNotes, str, str | None]:
+    block, mode, file_id = document_block(doc, path, on_upload)
     about = f"{asset['name']} ({asset.get('details') or asset['category']}, {asset.get('year') or 'year unknown'})" if asset else "the home in general"
     prompt = f"This document belongs to: {about}. Extract its maintenance information."
     notes = _parse(READER_SYSTEM, [block, {"type": "text", "text": prompt}], DocNotes)

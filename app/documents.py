@@ -1,4 +1,5 @@
 """Storing, downloading and extracting text from manuals, guides and photos."""
+import http.client
 import ipaddress
 import re
 import socket
@@ -35,18 +36,67 @@ def safe_name(name: str) -> str:
 
 # ---------- downloading ----------
 
+# NAT64 and 6to4 addresses embed an IPv4 address that may be private; Python counts the prefixes as global.
+_EMBEDS_IPV4 = [ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"), ipaddress.ip_network("2002::/16")]
+
+
+def is_public(address: str) -> bool:
+    ip = ipaddress.ip_address(address.split("%")[0])
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped:
+            return ip.ipv4_mapped.is_global
+        if any(ip in net for net in _EMBEDS_IPV4):
+            return False
+    return ip.is_global
+
+
 def _check_public(url: str):
-    """Only fetch from public internet hosts, so a link can't reach your router or other LAN devices."""
+    """Only fetch from public internet hosts, so a link can't reach your router or other LAN devices.
+    This gives a clear early error; the connection itself is checked again in _public_connection."""
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise DocumentError("Only http and https links can be downloaded.")
     try:
         infos = socket.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
-    except socket.gaierror:
+    except (socket.gaierror, ValueError):
         raise DocumentError(f"Couldn't find the site {parts.hostname}.")
-    for info in infos:
-        if not ipaddress.ip_address(info[4][0]).is_global:
-            raise DocumentError("That link points to a private or local address, so it wasn't downloaded.")
+    if not all(is_public(info[4][0]) for info in infos):
+        raise DocumentError(PRIVATE_ADDRESS)
+
+
+PRIVATE_ADDRESS = "That link points to a private or local address, so it wasn't downloaded."
+
+
+def _public_connection(address, *args, **kwargs):
+    """Connect, then check the address actually connected to. A host can resolve differently a moment after
+    _check_public looked it up (DNS rebinding), so this check is the one that counts."""
+    sock = socket.create_connection(address, *args, **kwargs)
+    if not is_public(sock.getpeername()[0]):
+        sock.close()
+        raise DocumentError(PRIVATE_ADDRESS)
+    return sock
+
+
+class _PublicHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _public_connection
+
+
+class _PublicHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _public_connection
+
+
+class _PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PublicHTTPConnection, req)
+
+
+class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PublicHTTPSConnection, req, context=self._context)
 
 
 class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
@@ -55,7 +105,11 @@ class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_CheckedRedirects)
+# No ProxyHandler: a proxy from HTTP(S)_PROXY would make every connection go to the proxy, bypassing the check.
+_opener = urllib.request.OpenerDirector()
+for _h in (urllib.request.UnknownHandler(), _PublicHTTPHandler(), _PublicHTTPSHandler(), urllib.request.HTTPDefaultErrorHandler(),
+           _CheckedRedirects(), urllib.request.HTTPErrorProcessor()):
+    _opener.add_handler(_h)
 
 
 def download(url: str) -> tuple[bytes, str, str]:

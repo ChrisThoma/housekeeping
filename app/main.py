@@ -1,89 +1,186 @@
+import asyncio
 import base64
+import ipaddress
 import json
+import logging
 import os
 import secrets
+import threading
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import anthropic
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from . import __version__, ai, db, documents, scheduler
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
 
+log = logging.getLogger("uvicorn.error")
+
+# Optional password, for when the app is reachable by others (a home server, a VPS).
+PASSWORD = os.environ.get("HOUSEKEEPING_PASSWORD", "")
+USERNAME = os.environ.get("HOUSEKEEPING_USERNAME") or "admin"
+# Host names the app answers to, besides IP addresses, localhost and local names like nas.local.
+ALLOWED_HOSTS = [h.strip().lower() for h in os.environ.get("HOUSEKEEPING_ALLOWED_HOSTS", "").split(",") if h.strip()]
+LOCAL_SUFFIXES = (".localhost", ".local", ".lan", ".home", ".home.arpa", ".internal")
+MAX_REQUEST_BYTES = documents.MAX_BYTES + 4 * 1024 * 1024  # the largest upload plus form overhead
+AUTH_FAILURE_DELAY = 1.0  # seconds; failed sign-ins are answered one at a time, so guessing is slow
+
+
 @asynccontextmanager
 async def lifespan(_app):
     db.init()
+    if not PASSWORD:
+        log.warning("Sign-in is off. Anyone who can reach this port can see your data and use your API credit. "
+                    "Set HOUSEKEEPING_PASSWORD unless the app is only reachable from this computer.")
     yield
 
 
 app = FastAPI(title="Housekeeping", version=__version__, lifespan=lifespan)
 
-# Optional password, for when the app is reachable by others (a home server, a VPS).
-PASSWORD = os.environ.get("HOUSEKEEPING_PASSWORD", "")
-USERNAME = os.environ.get("HOUSEKEEPING_USERNAME", "admin")
+
+def _host_allowed(host_header: str) -> bool:
+    """Without this, a web page on any site can use DNS rebinding to talk to the app from your browser."""
+    host = urllib.parse.urlsplit("//" + host_header).hostname or ""
+    if not host:
+        return False
+    if "*" in ALLOWED_HOSTS or host in ALLOWED_HOSTS or any(h.startswith(".") and host.endswith(h) for h in ALLOWED_HOSTS):
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return host == "localhost" or "." not in host or host.endswith(LOCAL_SUFFIXES)
 
 
-@app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    if not PASSWORD or request.url.path == "/api/health":
-        return await call_next(request)
-    header = request.headers.get("authorization", "")
-    if header.lower().startswith("basic "):
-        try:
-            user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
-        except (ValueError, UnicodeDecodeError):
-            user = pw = ""
-        if secrets.compare_digest(user.encode(), USERNAME.encode()) and secrets.compare_digest(pw.encode(), PASSWORD.encode()):
-            return await call_next(request)
+def _cross_site(request: Request) -> bool:
+    """True for a state-changing request sent by another website's page (CSRF)."""
+    site = request.headers.get("sec-fetch-site")
+    if site:
+        return site in ("cross-site", "same-site")
+    origin = request.headers.get("origin")
+    if not origin or origin == "null":
+        return origin == "null"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    return urllib.parse.urlsplit(origin).netloc.lower() != host.lower()
+
+
+_auth_gate: Optional[asyncio.Lock] = None
+_auth_waiting = 0
+
+
+async def _failed_sign_in() -> Response:
+    global _auth_gate, _auth_waiting
+    if _auth_waiting >= 20:
+        return Response("Too many sign-in attempts. Wait a minute and try again.", 429)
+    _auth_gate = _auth_gate or asyncio.Lock()
+    _auth_waiting += 1
+    try:
+        async with _auth_gate:
+            await asyncio.sleep(AUTH_FAILURE_DELAY)
+    finally:
+        _auth_waiting -= 1
     return Response("Sign in to use Housekeeping.", 401, {"WWW-Authenticate": 'Basic realm="Housekeeping"'})
 
 
+def _signed_in(request: Request) -> bool:
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("basic "):
+        return False
+    try:
+        user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return secrets.compare_digest(user.encode(), USERNAME.encode()) & secrets.compare_digest(pw.encode(), PASSWORD.encode())
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    if request.url.path == "/api/health":
+        return await call_next(request)
+    host = request.headers.get("host", "")
+    if (not PASSWORD or ALLOWED_HOSTS) and not _host_allowed(host):
+        return Response(f"Housekeeping doesn't answer to the address {host!r}. If that's how you reach it, "
+                        "add the name to HOUSEKEEPING_ALLOWED_HOSTS.", 400)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if _cross_site(request):
+            return Response("Requests from other websites aren't allowed.", 403)
+        length = request.headers.get("content-length")
+        if length is None and "chunked" in request.headers.get("transfer-encoding", "").lower():
+            return Response("Send a Content-Length header.", 411)
+        if length and (not length.isdigit() or int(length) > MAX_REQUEST_BYTES):
+            return Response("That upload is larger than 60 MB.", 413)
+    if PASSWORD and not _signed_in(request):
+        return await _failed_sign_in()
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
+clock = date.today  # tests replace this to fix "today"
+
+
 def today(override: Optional[str] = None) -> date:
-    return date.fromisoformat(override) if override else date.today()
+    if not override:
+        return clock()
+    try:
+        return date.fromisoformat(override)
+    except ValueError:
+        raise HTTPException(400, "as_of must be a date like 2026-11-20")
+
+
+def _require(conn, table: str, row_id: int, what: str):
+    row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, f"{what} not found")
+    return row
 
 
 # ---------- models ----------
 
 class AssetIn(BaseModel):
-    category: str
-    name: str
+    category: Literal["appliance", "home", "outdoor", "plant", "vehicle"]
+    name: str = Field(min_length=1, max_length=200)
     details: str = ""
-    year: Optional[int] = None
-    mileage: Optional[int] = None
+    year: Optional[int] = Field(None, ge=1800, le=2200)
+    mileage: Optional[int] = Field(None, ge=0)
     notes: str = ""
 
 
 class TaskIn(BaseModel):
     asset_id: Optional[int] = None
-    title: str
+    title: str = Field(min_length=1, max_length=300)
     description: str = ""
-    recurrence: str = "interval"
-    interval_days: Optional[int] = None
+    recurrence: Literal["interval", "seasonal", "mileage", "once"] = "interval"
+    interval_days: Optional[int] = Field(None, ge=1, le=36500)
     months: Optional[str] = None
-    mileage_interval: Optional[int] = None
-    priority: int = 2
-    est_minutes: Optional[int] = None
-    status: str = "active"
+    mileage_interval: Optional[int] = Field(None, ge=1)
+    priority: Literal[1, 2, 3] = 2
+    est_minutes: Optional[int] = Field(None, ge=0, le=100000)
+    status: Literal["active", "paused", "suggested"] = "active"
     source: str = "manual"
+    due_date: Optional[date] = None  # one-off tasks only: the deadline
 
 
 class CompletionIn(BaseModel):
     task_id: int
-    done_on: Optional[str] = None
-    mileage: Optional[int] = None
+    done_on: Optional[date] = None
+    mileage: Optional[int] = Field(None, ge=0)
     notes: str = ""
 
 
 class ApproveIn(BaseModel):
-    last_done_on: Optional[str] = None  # when you last did it, if you remember
+    last_done_on: Optional[date] = None  # when you last did it, if you remember
 
 
 class GuideIn(BaseModel):
@@ -91,30 +188,46 @@ class GuideIn(BaseModel):
 
 
 TASK_FIELDS = ["asset_id", "title", "description", "recurrence", "interval_days", "months",
-               "mileage_interval", "priority", "est_minutes", "status", "source"]
+               "mileage_interval", "priority", "est_minutes", "status", "source", "due_date"]
+
+
+def _task_values(t: "TaskIn") -> list:
+    return [v.isoformat() if isinstance(v, date) else v for v in (getattr(t, f) for f in TASK_FIELDS)]
 
 
 def _validate_task(t: TaskIn):
-    if t.recurrence not in ("interval", "seasonal", "mileage"):
-        raise HTTPException(400, "recurrence must be interval, seasonal or mileage")
+    """Checks that need more than one field. Also tidies months to a sorted list of valid months."""
     if t.recurrence == "interval" and not t.interval_days:
         raise HTTPException(400, "Interval tasks need interval_days")
-    if t.recurrence == "seasonal" and not scheduler.parse_months(t.months):
-        raise HTTPException(400, "Seasonal tasks need at least one month")
+    if t.recurrence == "seasonal":
+        months = scheduler.parse_months(t.months)
+        if not months:
+            raise HTTPException(400, "Seasonal tasks need at least one month (1-12)")
+        t.months = ",".join(str(m) for m in sorted(months))
     if t.recurrence == "mileage" and not t.mileage_interval:
         raise HTTPException(400, "Mileage tasks need mileage_interval")
+    if t.recurrence == "once":
+        t.interval_days = t.months = t.mileage_interval = None
+    else:
+        t.due_date = None
 
 
 def _insert_suggestions(conn, suggestions, asset_id_for, source: str) -> int:
+    """Store Claude's suggestions for review. Any that wouldn't make a workable task are dropped here,
+    so approving one can never produce a task that is always due or never due."""
     n = 0
     for s in suggestions:
+        try:
+            t = TaskIn(asset_id=asset_id_for(s), title=s.title, description=s.description, recurrence=s.recurrence,
+                       interval_days=s.interval_days, months=",".join(str(m) for m in s.months or []) or None,
+                       mileage_interval=s.mileage_interval, priority=s.priority, est_minutes=s.est_minutes,
+                       status="suggested", source=source)
+            _validate_task(t)
+        except (ValidationError, HTTPException):
+            continue
         conn.execute(
-            """INSERT INTO tasks (asset_id, title, description, recurrence, interval_days, months,
-                                  mileage_interval, priority, est_minutes, status, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'suggested', ?)""",
-            (asset_id_for(s), s.title, s.description, s.recurrence, s.interval_days,
-             ",".join(str(m) for m in s.months) if s.months else None,
-             s.mileage_interval, s.priority, s.est_minutes, source),
+            f"INSERT INTO tasks ({', '.join(TASK_FIELDS)}) VALUES ({', '.join('?' * len(TASK_FIELDS))})",
+            _task_values(t),
         )
         n += 1
     return n
@@ -165,13 +278,20 @@ def read_settings():
         return db.get_settings(conn)
 
 
+SETTING_CHOICES = {"hemisphere": {"north", "south"}, "plan_mode": {"daily", "weekly"}}
+
+
 @app.put("/api/settings")
 def write_settings(values: dict[str, str]):
-    allowed = set(db.DEFAULT_SETTINGS)
+    values = {k: str(v).strip() for k, v in values.items() if k in db.DEFAULT_SETTINGS}
+    for k, choices in SETTING_CHOICES.items():
+        if k in values and values[k] not in choices:
+            raise HTTPException(400, f"{k} must be one of: {', '.join(sorted(choices))}")
+    if "plan_count" in values and not (values["plan_count"].isdigit() and 1 <= int(values["plan_count"]) <= 50):
+        raise HTTPException(400, "plan_count must be a whole number from 1 to 50")
     with db.connect() as conn:
         for k, v in values.items():
-            if k in allowed:
-                conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v)))
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
         return db.get_settings(conn)
 
 
@@ -206,8 +326,8 @@ async def scan_asset(file: UploadFile = File(...)):
     mime = documents.sniff_mime(data, file.content_type or "")
     if mime not in documents.IMAGE_TYPES:
         raise HTTPException(400, "Choose a photo (JPEG, PNG, WebP or GIF).")
-    if len(data) > 5 * 1024 * 1024:
-        raise HTTPException(400, "That photo is larger than 5 MB. Try a smaller one.")
+    if (len(data) + 2) // 3 * 4 > 5 * 1024 * 1024:  # the API's 5 MB limit applies to the base64 encoding
+        raise HTTPException(400, "That photo is larger than 3.75 MB. Try a smaller one.")
     s = _ai_errors(lambda: ai.scan_item(data, mime))
     if not s.readable:
         raise HTTPException(422, s.problem or "Couldn't make out the item in that photo. Try a closer, sharper one.")
@@ -228,6 +348,7 @@ async def scan_asset(file: UploadFile = File(...)):
 @app.put("/api/assets/{asset_id}")
 def update_asset(asset_id: int, a: AssetIn):
     with db.connect() as conn:
+        _require(conn, "assets", asset_id, "Item")
         conn.execute(
             "UPDATE assets SET category=?, name=?, details=?, year=?, mileage=?, notes=? WHERE id=?",
             (a.category, a.name, a.details, a.year, a.mileage, a.notes, asset_id),
@@ -302,6 +423,11 @@ def _remove_document(doc: dict):
     ai.forget_file(doc.get("anthropic_file_id"))
 
 
+def _remember_file(doc_id: int, file_id: str):
+    with db.connect() as conn:
+        conn.execute("UPDATE documents SET anthropic_file_id = ? WHERE id = ?", (file_id, doc_id))
+
+
 def _read_and_store(doc_id: int) -> Optional[str]:
     """Have Claude read a stored document and save its notes. Returns an error message instead of raising,
     so a document you just added is kept even when reading fails."""
@@ -309,9 +435,13 @@ def _read_and_store(doc_id: int) -> Optional[str]:
         doc = _get_doc(conn, doc_id)
         asset = conn.execute("SELECT * FROM assets WHERE id = ?", (doc["asset_id"],)).fetchone() if doc["asset_id"] else None
     try:
-        notes, mode, file_id = _ai_errors(lambda: ai.read_document(doc, documents.path_for(doc), dict(asset) if asset else None))
+        notes, mode, file_id = _ai_errors(lambda: ai.read_document(
+            doc, documents.path_for(doc), dict(asset) if asset else None, on_upload=lambda fid: _remember_file(doc_id, fid)))
     except HTTPException as e:
         return e.detail
+    except Exception as e:  # never lose a stored document to an unexpected error while reading it
+        log.exception("Reading document %s failed", doc_id)
+        return f"Reading it failed unexpectedly ({type(e).__name__}: {e})"
     with db.connect() as conn:
         conn.execute("UPDATE documents SET notes = ?, read_mode = ?, anthropic_file_id = ? WHERE id = ?",
                      (notes.model_dump_json(), mode, file_id, doc_id))
@@ -379,9 +509,24 @@ def add_document_link(body: LinkIn):
         return {"document": _doc_row(conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()), "read_error": error}
 
 
+_searching: set[int] = set()
+_searching_lock = threading.Lock()
+
+
 @app.post("/api/assets/{asset_id}/find-documents")
 def find_documents(asset_id: int):
     """Claude searches the web for this item's manuals; the app downloads and reads each one it finds."""
+    with _searching_lock:
+        if asset_id in _searching:
+            raise HTTPException(409, "Already searching for this item's manuals.")
+        _searching.add(asset_id)
+    try:
+        return _find_documents(asset_id)
+    finally:
+        _searching.discard(asset_id)
+
+
+def _find_documents(asset_id: int):
     with db.connect() as conn:
         asset = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
         if not asset:
@@ -394,6 +539,7 @@ def find_documents(asset_id: int):
         if f.url in known:
             skipped.append({"title": f.title, "url": f.url, "reason": "Already saved"})
             continue
+        known.add(f.url)  # Claude sometimes reports the same link twice
         try:
             data, mime, filename = documents.download(f.url)
             doc_id = _store(data=data, mime=mime, filename=filename, title=f.title, asset_id=asset_id,
@@ -459,7 +605,10 @@ def document_file(doc_id: int):
     path = documents.path_for(doc)
     if not path.exists():
         raise HTTPException(404, "The file is missing from the documents folder.")
-    return FileResponse(path, media_type=doc["mime"], content_disposition_type="inline", filename=doc["filename"])
+    # Stored files came from the internet; never let one run as a page on this site. (PDFs are exempt
+    # because browsers won't show a PDF under a sandbox policy, and a PDF can't script the page.)
+    headers = {} if doc["mime"] == "application/pdf" else {"Content-Security-Policy": "sandbox; default-src 'none'; img-src 'self'"}
+    return FileResponse(path, media_type=doc["mime"], content_disposition_type="inline", filename=doc["filename"], headers=headers)
 
 
 @app.delete("/api/documents/{doc_id}")
@@ -500,18 +649,21 @@ def create_task(t: TaskIn):
     with db.connect() as conn:
         cur = conn.execute(
             f"INSERT INTO tasks ({', '.join(TASK_FIELDS)}) VALUES ({', '.join('?' * len(TASK_FIELDS))})",
-            [getattr(t, f) for f in TASK_FIELDS],
+            _task_values(t),
         )
-        return dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone())
+        # A one-off job you add by hand that's already due goes straight into this period's plan.
+        planned = t.recurrence == "once" and t.status == "active" and scheduler.add_if_due(conn, db.get_settings(conn), clock(), cur.lastrowid)
+        return {**dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone()), "planned": planned}
 
 
 @app.put("/api/tasks/{task_id}")
 def update_task(task_id: int, t: TaskIn):
     _validate_task(t)
     with db.connect() as conn:
+        _require(conn, "tasks", task_id, "Task")
         conn.execute(
             f"UPDATE tasks SET {', '.join(f + ' = ?' for f in TASK_FIELDS)} WHERE id = ?",
-            [getattr(t, f) for f in TASK_FIELDS] + [task_id],
+            _task_values(t) + [task_id],
         )
         return dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
 
@@ -519,10 +671,17 @@ def update_task(task_id: int, t: TaskIn):
 @app.post("/api/tasks/{task_id}/approve")
 def approve_task(task_id: int, body: ApproveIn):
     with db.connect() as conn:
+        task = dict(_require(conn, "tasks", task_id, "Task"))
+        if task["status"] != "suggested":
+            return {"ok": True}  # already approved, e.g. a double click; don't log the history twice
+        try:
+            _validate_task(TaskIn(**{f: task[f] for f in TASK_FIELDS}))
+        except (ValidationError, HTTPException):
+            raise HTTPException(400, "This suggestion is missing its schedule. Edit it before approving.")
         conn.execute("UPDATE tasks SET status = 'active' WHERE id = ?", (task_id,))
         if body.last_done_on:
             conn.execute("INSERT INTO completions (task_id, done_on, notes) VALUES (?, ?, 'Initial history')",
-                         (task_id, body.last_done_on))
+                         (task_id, body.last_done_on.isoformat()))
     return {"ok": True}
 
 
@@ -531,20 +690,24 @@ def set_task_status(task_id: int, status: str):
     if status not in ("active", "paused"):
         raise HTTPException(400, "status must be active or paused")
     with db.connect() as conn:
+        _require(conn, "tasks", task_id, "Task")
         conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
     return {"ok": True}
 
 
 @app.post("/api/tasks/{task_id}/snooze")
-def snooze_task(task_id: int, days: int = 7, as_of: Optional[str] = None):
-    until = today(as_of) + timedelta(days=days)
+def snooze_task(task_id: int, days: int = Query(7, ge=1, le=3650), as_of: Optional[str] = None):
+    d = today(as_of)
+    until = d + timedelta(days=days)
     with db.connect() as conn:
+        _require(conn, "tasks", task_id, "Task")
         conn.execute("UPDATE tasks SET snoozed_until = ? WHERE id = ?", (until.isoformat(), task_id))
-        conn.execute(
-            """DELETE FROM plan_items WHERE task_id = ? AND task_id NOT IN
-               (SELECT task_id FROM completions WHERE done_on >= ?)""",
-            (task_id, (today(as_of) - timedelta(days=7)).isoformat()),
-        )
+        # Free its slot in the current plan, unless it was already done this period.
+        period, start, end = scheduler.period_for(db.get_settings(conn).get("plan_mode", "weekly"), d)
+        done = conn.execute("SELECT 1 FROM completions WHERE task_id = ? AND done_on BETWEEN ? AND ?",
+                            (task_id, start.isoformat(), end.isoformat())).fetchone()
+        if not done:
+            conn.execute("DELETE FROM plan_items WHERE task_id = ? AND period = ?", (task_id, period))
     return {"snoozed_until": until.isoformat()}
 
 
@@ -559,30 +722,40 @@ def delete_task(task_id: int):
 
 @app.post("/api/completions")
 def complete(c: CompletionIn, as_of: Optional[str] = None):
-    done_on = c.done_on or today(as_of).isoformat()
+    done_on = (c.done_on or today(as_of)).isoformat()
     with db.connect() as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (c.task_id,)).fetchone()
-        if not task:
-            raise HTTPException(404, "Task not found")
-        cur = conn.execute("INSERT INTO completions (task_id, done_on, mileage, notes) VALUES (?, ?, ?, ?)",
-                           (c.task_id, done_on, c.mileage, c.notes))
+        task = _require(conn, "tasks", c.task_id, "Task")
+        asset = conn.execute("SELECT * FROM assets WHERE id = ?", (task["asset_id"],)).fetchone() if task["asset_id"] else None
+        vehicle = asset is not None and asset["category"] == "vehicle"
+        mileage, prev = c.mileage, None
+        if mileage is None and task["recurrence"] == "mileage" and vehicle and asset["mileage"]:
+            mileage = asset["mileage"]  # done now with no reading: count miles from the car's last known odometer
+        elif c.mileage and vehicle and c.mileage > (asset["mileage"] or 0):
+            prev = asset["mileage"] if asset["mileage"] is not None else -1  # -1: the car had no reading before
+        cur = conn.execute("INSERT INTO completions (task_id, done_on, mileage, notes, prev_asset_mileage) VALUES (?, ?, ?, ?, ?)",
+                           (c.task_id, done_on, mileage, c.notes, prev))
         conn.execute("UPDATE tasks SET snoozed_until = NULL WHERE id = ?", (c.task_id,))
         # A mileage reading on a vehicle task also updates the vehicle's odometer.
-        if c.mileage and task["asset_id"]:
-            conn.execute("UPDATE assets SET mileage = MAX(COALESCE(mileage, 0), ?) WHERE id = ? AND category = 'vehicle'",
-                         (c.mileage, task["asset_id"]))
+        if prev is not None:
+            conn.execute("UPDATE assets SET mileage = ? WHERE id = ?", (c.mileage, asset["id"]))
         return {"id": cur.lastrowid}
 
 
 @app.delete("/api/completions/{completion_id}")
 def undo_completion(completion_id: int):
     with db.connect() as conn:
+        c = _require(conn, "completions", completion_id, "Completion")
         conn.execute("DELETE FROM completions WHERE id = ?", (completion_id,))
+        # Put the odometer back if this completion moved it and nothing has changed it since.
+        if c["prev_asset_mileage"] is not None:
+            conn.execute(
+                "UPDATE assets SET mileage = ? WHERE id = (SELECT asset_id FROM tasks WHERE id = ?) AND mileage = ?",
+                (None if c["prev_asset_mileage"] < 0 else c["prev_asset_mileage"], c["task_id"], c["mileage"]))
     return {"ok": True}
 
 
 @app.get("/api/history")
-def history(limit: int = 200):
+def history(limit: int = Query(200, ge=1, le=5000)):
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT c.*, t.title, a.name AS asset_name FROM completions c
@@ -596,20 +769,28 @@ def history(limit: int = 200):
 
 @app.get("/api/plan")
 def plan(as_of: Optional[str] = None):
+    """With as_of, a preview: the plan that date would get, computed without saving anything."""
     with db.connect() as conn:
-        return scheduler.get_plan(conn, db.get_settings(conn), today(as_of))
+        return scheduler.get_plan(conn, db.get_settings(conn), today(as_of), persist=as_of is None)
+
+
+def _no_preview(as_of: Optional[str]):
+    if as_of:
+        raise HTTPException(400, "Previews are read-only. Remove as_of to change the plan.")
 
 
 @app.post("/api/plan/regenerate")
 def regenerate_plan(as_of: Optional[str] = None):
+    _no_preview(as_of)
     with db.connect() as conn:
-        return scheduler.get_plan(conn, db.get_settings(conn), today(as_of), regenerate=True)
+        return scheduler.get_plan(conn, db.get_settings(conn), clock(), regenerate=True)
 
 
 @app.post("/api/plan/more")
-def more_plan(as_of: Optional[str] = None, n: int = 1):
+def more_plan(as_of: Optional[str] = None, n: int = Query(1, ge=1, le=20)):
+    _no_preview(as_of)
     with db.connect() as conn:
-        return scheduler.get_plan(conn, db.get_settings(conn), today(as_of), extra=n)
+        return scheduler.get_plan(conn, db.get_settings(conn), clock(), extra=n)
 
 
 # ---------- frontend ----------

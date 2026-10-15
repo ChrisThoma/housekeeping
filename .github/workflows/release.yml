@@ -1,20 +1,27 @@
 name: Release
 
-# Pushing a tag like v0.2.0 runs the tests, then publishes ghcr.io/<owner>/<repo>:0.2.0, :0.2 and :latest
-# for amd64 and arm64, and creates a GitHub release. The tag must match __version__ in app/__init__.py.
+# Pushing a tag like v0.2.0 runs the tests, then publishes ghcr.io/<owner>/<repo>:0.2.0 and :0.2 for amd64 and
+# arm64, and creates a GitHub release. The tag must match __version__ in app/__init__.py.
+# :latest moves only for the highest stable version, so a backport like v0.1.2 after v0.2.0 doesn't take it.
+# Tags with a hyphen (v0.3.0-rc.1) are prereleases: no :latest or :major.minor, and the release is marked as one.
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-  packages: write
+permissions: {}
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      latest: ${{ steps.latest.outputs.latest }}
+      prerelease: ${{ steps.latest.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -22,12 +29,24 @@ jobs:
         run: |
           version=$(python -c "import app; print(app.__version__)")
           [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME doesn't match app version $version"; exit 1; }
-      - run: pip install -r requirements-dev.txt
+      - id: latest
+        name: Is this the newest stable version?
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          newest=$(git tag -l 'v*' | grep -v -- - | sort -V | tail -n 1)
+          [ "$prerelease" = false ] && [ "$newest" = "$GITHUB_REF_NAME" ] && latest=true || latest=false
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease latest=$latest (newest stable tag: $newest)"
+      - run: pip install -r requirements-dev.txt -c requirements.lock
       - run: python -m pytest -q
 
   publish:
     needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub release
+      packages: write   # push the image
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -41,9 +60,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.check.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.check.outputs.latest == 'true' }}
           labels: |
             org.opencontainers.image.title=Housekeeping
             org.opencontainers.image.description=A self-hosted home maintenance planner
@@ -59,4 +80,8 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          flags="--generate-notes --verify-tag"
+          [ "${{ needs.check.outputs.prerelease }}" = true ] && flags="$flags --prerelease"
+          [ "${{ needs.check.outputs.latest }}" = true ] || flags="$flags --latest=false"
+          gh release create "$GITHUB_REF_NAME" $flags
