@@ -1005,6 +1005,12 @@ async function loadStatus() {
   try { dismissed = localStorage.getItem("hk-banner-dismissed") === "1"; } catch {}
   $("#setup-banner").hidden = s.ai_configured || dismissed;
 }
+// Signing out everywhere also signs out every other device, so it takes a second click.
+$("#sign-out-everywhere").addEventListener("click", (e) => {
+  const btn = e.currentTarget;
+  e.preventDefault();
+  armConfirm(btn, "Sign out all?", () => btn.form.requestSubmit(btn));
+});
 $("#banner-close").addEventListener("click", () => {
   $("#setup-banner").hidden = true;
   try { localStorage.setItem("hk-banner-dismissed", "1"); } catch {}

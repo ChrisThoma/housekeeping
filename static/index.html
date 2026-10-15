@@ -175,14 +175,20 @@
       <div class="row"><dt>Version</dt><dd id="about-version">—</dd></div>
       <div class="row"><dt>Claude</dt><dd id="about-ai">—</dd></div>
       <div class="row"><dt>API</dt><dd><a href="/docs" target="_blank" rel="noopener">Reference</a></dd></div>
-      <div class="row" id="about-account" hidden><dt>Account</dt><dd>
-        <form method="post" action="/logout" class="actions">
-          <button class="btn secondary small" type="submit">Sign out</button>
-          <button class="btn quiet small" type="submit" name="everywhere" value="true">Sign out everywhere</button>
-        </form>
-        <p class="hint">Sign out only signs out this browser. Sign out everywhere signs out every phone and computer.</p>
-      </dd></div>
     </dl>
+    <div id="about-account" hidden>
+      <h2 class="section-title">Account</h2>
+      <form method="post" action="/logout" class="list account">
+        <div class="row">
+          <div class="row-main"><div class="row-title">Sign out</div><div class="row-meta">Only this browser.</div></div>
+          <button class="btn secondary small" type="submit">Sign out</button>
+        </div>
+        <div class="row">
+          <div class="row-main"><div class="row-title">Sign out everywhere</div><div class="row-meta">Every phone and computer, this one too.</div></div>
+          <button class="btn secondary small danger" type="submit" name="everywhere" value="true" id="sign-out-everywhere">Sign out all</button>
+        </div>
+      </form>
+    </div>
   </section>
 </main>
 
