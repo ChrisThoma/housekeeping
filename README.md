@@ -16,10 +16,11 @@
 ## Features
 
 - **Inventory of everything that needs care.** Appliances, home systems, outdoor features, plants and lawn, and vehicles with model year and odometer reading.
+- **Add items by photo.** Under **Add item → Scan a label**, take a picture of the rating plate, VIN sticker or plant tag. Claude fills in the kind, make and model, and year, plus specs that matter for care, such as filter size or refrigerant. It only fills in a year that's printed or decoded from a date code or VIN, and says which. The photo is kept with the item.
 - **A plan with a fixed size.** Choose how many tasks you want per week (or per day). The scheduler picks the most urgent ones and keeps the list stable for the period. Snooze or pause a task to free its slot.
 - **Three kinds of schedule.** Every N days (furnace filter, 90 days), seasonal windows (clean gutters, Oct–Nov), and every N miles with a time cap (oil change, 5,000 mi or 6 months).
 - **Suggestions from Claude, approved by you.** Claude proposes a schedule for each item based on its make, model, year and your climate. Nothing reaches your plan until you approve it.
-- **Reads the manuals.** *Find manuals* searches the web for an item's owner's manual and downloads it. You can also upload PDFs or photos of a data plate, or paste a link. Claude notes the maintenance intervals with page numbers, part numbers and filter sizes, and suggestions follow the manufacturer's intervals.
+- **Reads the manuals.** *Find manuals* searches the web for an item's owner's manual and downloads it. Spec sheets and parts pages are discarded. You can also upload PDFs or photos of a data plate, or paste a link. Claude notes the maintenance intervals with page numbers, part numbers and filter sizes, and suggestions follow the manufacturer's intervals.
 - **Imports your own checklist.** Under **Tasks → Import a checklist**, paste it, or upload a PDF or photo, and each recurring item becomes a task.
 - **A logbook.** Every completion is recorded with the date, odometer reading and notes.
 - **Self-hosted and private.** One container and a SQLite file. No account and no telemetry. It uses your system font and makes no third-party requests except to the Anthropic API.
@@ -77,7 +78,7 @@ All settings are environment variables. With Docker, put them in `.env`.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (none) | Turns on task suggestions, Find manuals and document reading. Everything else works without it. |
+| `ANTHROPIC_API_KEY` | (none) | Turns on task suggestions, label scanning, Find manuals and document reading. Everything else works without it. |
 | `HOUSEKEEPING_PASSWORD` | (none) | Turns on HTTP basic sign-in for the whole app, except the health check. |
 | `HOUSEKEEPING_USERNAME` | `admin` | User name for sign-in. |
 | `HOUSEKEEPING_MODEL` | `claude-opus-5-5` | Claude model to use. |
