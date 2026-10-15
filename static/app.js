@@ -74,8 +74,13 @@ function toast(msg, isError = false) {
 function dismissToast(el) {
   if (el.classList.contains("leaving")) return;
   el.classList.add("leaving");
-  el.addEventListener("transitionend", () => el.remove(), { once: true });
-  setTimeout(() => el.remove(), 400);
+  const remove = () => {
+    el.remove();
+    const stack = $("#toasts");
+    if (!stack.children.length && stack.matches?.(":popover-open")) stack.hidePopover();  // nothing left to show
+  };
+  el.addEventListener("transitionend", remove, { once: true });
+  setTimeout(remove, 400);
 }
 document.addEventListener("visibilitychange", () => {
   document.querySelectorAll(".toast:not(.leaving)").forEach((t) => (document.hidden ? t._pause?.() : t._resume?.()));

@@ -254,3 +254,14 @@ def test_databases_from_0_1_0_are_upgraded(tmp_path, monkeypatch):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)
         assert "prev_asset_mileage" in [r[1] for r in conn.execute("PRAGMA table_info(completions)")]
         assert conn.execute("SELECT title FROM tasks").fetchone()[0] == "Old task"
+
+
+def test_app_files_are_revalidated_so_updates_reach_the_browser(client):
+    for path in ["/", "/static/style.css", "/static/app.js"]:
+        assert client.get(path).headers["cache-control"] == "no-cache", path
+
+
+def test_page_links_versioned_assets(client):
+    from app import __version__
+    html = client.get("/").text
+    assert f'/static/style.css?v={__version__}"' in html and f'/static/app.js?v={__version__}"' in html

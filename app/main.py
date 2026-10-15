@@ -14,7 +14,7 @@ from typing import Literal, Optional
 
 import anthropic
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -121,6 +121,10 @@ async def guard(request: Request, call_next):
     if PASSWORD and not _signed_in(request):
         return await _failed_sign_in()
     response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        # Check for a newer copy on every load (cheap: unchanged files come back as 304), so after an update
+        # the browser never pairs the new page with an old stylesheet or script.
+        response.headers.setdefault("Cache-Control", "no-cache")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -800,4 +804,8 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    # Version the stylesheet and script URLs, so browsers holding copies from an older release fetch the new ones.
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("style.css", "app.js"):
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={__version__}"')
+    return HTMLResponse(html)
