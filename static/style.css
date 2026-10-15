@@ -303,3 +303,14 @@ a.row-title { color: inherit; }
   .row { break-inside: avoid; }
   .check { box-shadow: inset 0 0 0 1.5px #000; }
 }
+
+/* ---------- sign in ---------- */
+.sign-in main { display: grid; place-items: center; min-height: 100dvh; padding: 24px 16px; box-sizing: border-box; }
+.sign-in-card { display: grid; gap: 16px; width: min(360px, 100%); box-sizing: border-box; padding: 28px; }
+.sign-in-card img { border-radius: 10px; }
+.sign-in-card h1 { margin: 0 0 4px; font-size: 1.375rem; letter-spacing: -0.016em; }
+.sign-in-card .btn { height: 38px; margin-top: 4px; }
+.sign-in-card input:not([type="checkbox"]) { height: 40px; font-size: 16px; }  /* 16px stops iPhones zooming in */
+.sign-in-error { margin: 0; color: var(--overdue); font-size: 0.875rem; }
+.remember { display: flex; align-items: center; gap: 8px; font-weight: 400; color: var(--ink); }
+.remember input { width: 16px; height: 16px; margin: 0; box-shadow: none; accent-color: var(--accent); }

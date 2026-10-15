@@ -4,12 +4,13 @@ import http.server
 import socket
 import sqlite3
 import threading
+import time
 from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import ai, db, documents, main
+from app import ai, auth, db, documents, main
 
 
 @pytest.fixture
@@ -54,17 +55,201 @@ def test_oversized_uploads_are_refused_before_reading(client):
     assert r.status_code == 413
 
 
-def test_sign_in(client, monkeypatch):
+@pytest.fixture
+def signed_out(client, monkeypatch):
     monkeypatch.setattr(main, "PASSWORD", "hunter2")
     monkeypatch.setattr(main, "AUTH_FAILURE_DELAY", 0)
+    monkeypatch.setattr(main, "_failures", [])
+    auth._keys.clear()
+    return client
+
+
+def sign_in(client, remember=True, next="/"):
+    data = {"username": "admin", "password": "hunter2", "next": next, **({"remember": "true"} if remember else {})}
+    return client.post("/login", data=data, follow_redirects=False)
+
+
+def cookies(r):
+    return r.headers.get_list("set-cookie")
+
+
+def use(client, token):
+    """Send exactly this session cookie (the test client otherwise keeps stale copies a browser would replace)."""
+    client.cookies.clear()
+    client.cookies.set("hk_session", token)
+
+
+def test_scripts_can_use_basic_auth(signed_out):
+    client = signed_out
     good = "Basic " + base64.b64encode(b"admin:hunter2").decode()
     bad = "Basic " + base64.b64encode(b"admin:wrong").decode()
-    assert client.get("/api/settings").status_code == 401
-    assert client.get("/api/settings", headers={"Authorization": bad}).status_code == 401
     assert client.get("/api/settings", headers={"Authorization": good}).status_code == 200
+    assert client.get("/api/settings", headers={"Authorization": bad}).status_code == 401
     assert client.get("/api/health").status_code == 200
+    # Scripts that wait to be asked (wget, urllib) get the challenge; the app's own fetches must not.
+    assert client.get("/api/settings").headers["www-authenticate"].startswith("Basic")
+    assert "www-authenticate" not in client.get("/api/settings", headers={"Sec-Fetch-Site": "same-origin"}).headers
     # With a password, any host name works (behind a reverse proxy, for example).
     assert client.get("/api/settings", headers={"Authorization": good, "Host": "house.example.com"}).status_code == 200
+
+
+def test_sign_in_page_and_remembered_session(signed_out):
+    client = signed_out
+    r = client.get("/?as_of=2026-11-20", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login?next=/%3Fas_of%3D2026-11-20"  # keeps the query
+    page = client.get("/login?next=/docs")
+    assert 'autocomplete="current-password"' in page.text and 'name="next" value="/docs"' in page.text
+    assert 'id="login-error" hidden' in page.text
+    assert client.head("/login").status_code == 200
+    assert client.get("/static/style.css").status_code == 200  # the sign-in page needs it
+
+    r = client.post("/login", data={"username": "admin", "password": "wrong", "next": "/#plan"}, follow_redirects=False)
+    assert r.headers["location"].startswith("/login?error=1") and not cookies(r)
+    error_page = client.get(r.headers["location"])
+    assert 'id="login-error" role="alert">' in error_page.text and 'aria-invalid="true"' in error_page.text
+    assert 'value="/#plan"' in error_page.text  # the way back survives a wrong password
+
+    r = sign_in(client, next="/#plan")
+    assert r.status_code == 303 and r.headers["location"] == "/#plan"
+    cookie = cookies(r)[0]
+    assert "HttpOnly" in cookie and "SameSite=lax" in cookie and f"Max-Age={auth.REMEMBER_SECONDS}" in cookie
+    assert client.get("/api/settings").status_code == 200
+    assert client.get("/login", follow_redirects=False).status_code == 303  # already signed in
+
+
+def test_short_session_ends_with_the_browser(signed_out):
+    r = sign_in(signed_out, remember=False)
+    assert "Max-Age" not in cookies(r)[0]
+    first, issued, expires = auth.check(r.cookies["hk_session"], "admin", "hunter2")
+    assert expires - issued == auth.SHORT_SECONDS
+
+
+def test_sign_out_works_for_an_older_session(signed_out):
+    """Renewal used to re-add a fresh cookie after the sign-out deleted it."""
+    client = signed_out
+    use(client, auth.issue("admin", "hunter2", auth.REMEMBER_SECONDS, now=time.time() - 3 * 86400))
+    r = client.post("/logout", follow_redirects=False)
+    # The browser applies Set-Cookie headers in order, so the only one must be the deletion.
+    assert r.headers["location"] == "/login" and len(cookies(r)) == 1 and 'hk_session=""' in cookies(r)[0]
+
+
+def test_sign_out_when_already_signed_out_goes_to_sign_in(signed_out):
+    r = signed_out.post("/logout", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def test_sign_out_everywhere(signed_out):
+    client = signed_out
+    other_device = auth.issue("admin", "hunter2", auth.REMEMBER_SECONDS)
+    sign_in(client)
+    client.post("/logout", data={"everywhere": "true"})
+    use(client, other_device)
+    assert client.get("/api/settings").status_code == 401
+    # Without a valid session, "everywhere" signs nobody else out.
+    still_good = auth.issue("admin", "hunter2", 3600)
+    client.cookies.clear()
+    client.post("/logout", data={"everywhere": "true"})
+    use(client, still_good)
+    assert client.get("/api/settings").status_code == 200
+
+
+def test_bad_sessions_are_refused(signed_out, monkeypatch):
+    client = signed_out
+    now = time.time()
+    good = auth.issue("admin", "hunter2", 3600)
+    bad = [
+        auth.issue("admin", "hunter2", 60, now=now - 120),                                     # expired
+        auth.issue("admin", "hunter2", 3600, first=int(now - auth.MAX_AGE - 60)),              # older than a year
+        good[:-1] + ("0" if good[-1] != "0" else "1"),                                         # tampered
+        "garbage", "+1.2.3." + "0" * 64, " 1.2.3." + "0" * 64,
+    ]
+    for token in bad:
+        use(client, token)
+        assert client.get("/api/settings").status_code == 401, token
+    use(client, good)
+    assert client.get("/api/settings").status_code == 200
+    monkeypatch.setattr(main, "PASSWORD", "new password")  # changing the password signs everyone out
+    assert client.get("/api/settings").status_code == 401
+
+
+def test_non_ascii_cookie_is_refused_not_a_crash(signed_out):
+    for path in ["/api/settings", "/", "/login"]:
+        r = signed_out.get(path, headers={"Cookie": "hk_session=1.2.3.\xe9".encode("latin-1")}, follow_redirects=False)
+        assert r.status_code in (200, 303, 401), path
+
+
+def test_sessions_are_renewed_with_use_but_not_forever(signed_out):
+    client = signed_out
+    first = int(time.time() - 200 * 86400)
+    use(client, auth.issue("admin", "hunter2", auth.REMEMBER_SECONDS, first=first, now=time.time() - 2 * 86400))
+    r = client.get("/api/settings")
+    assert r.status_code == 200 and f"Max-Age={auth.REMEMBER_SECONDS}" in cookies(r)[0]
+    assert auth.check(r.cookies["hk_session"], "admin", "hunter2")[0] == first  # the sign-in date carries over
+    use(client, auth.issue("admin", "hunter2", auth.REMEMBER_SECONDS))
+    assert not cookies(client.get("/api/settings"))  # fresh: nothing to renew
+    # Short sessions slide too (hourly), and stay browser-session cookies.
+    use(client, auth.issue("admin", "hunter2", auth.SHORT_SECONDS, now=time.time() - 2 * 3600))
+    r = client.get("/api/settings")
+    assert cookies(r) and "Max-Age" not in cookies(r)[0]
+
+
+def test_guessing_is_capped_and_a_right_guess_looks_the_same(signed_out, monkeypatch):
+    client = signed_out
+    for _ in range(main.FAILURE_LIMIT):
+        client.post("/login", data={"username": "admin", "password": "guess"}, follow_redirects=False)
+    r = sign_in(client)
+    assert r.status_code == 429 and not cookies(r)  # even the right password is refused for now
+    good = "Basic " + base64.b64encode(b"admin:hunter2").decode()
+    assert client.get("/api/settings", headers={"Authorization": good}).status_code == 429
+    monkeypatch.setattr(main, "_failures", [])  # a minute later
+    assert sign_in(client).status_code == 303
+
+
+def test_wrong_basic_auth_counts_toward_the_limit(signed_out):
+    bad = "Basic " + base64.b64encode(b"admin:guess").decode()
+    for _ in range(main.FAILURE_LIMIT):
+        signed_out.get("/api/settings", headers={"Authorization": bad})
+    assert sign_in(signed_out).status_code == 429
+
+
+def test_opening_a_manual_after_signing_out_offers_sign_in(signed_out):
+    r = signed_out.get("/api/documents/1/file", headers={"Sec-Fetch-Mode": "navigate"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/login?next=/api/documents/1/file")
+
+
+@pytest.mark.parametrize("target", ["https://evil.example/", "//evil.example/", "/\\evil.example", "javascript:alert(1)"])
+def test_sign_in_only_returns_to_this_site(signed_out, target):
+    assert sign_in(signed_out, next=target).headers["location"] == "/"
+
+
+def test_session_key_is_private_survives_restarts_and_repairs_itself(client):
+    token = auth.issue("admin", "pw", 3600)
+    auth._keys.clear()  # as if the app restarted
+    assert auth.check(token, "admin", "pw")
+    key = db.DB_PATH.parent / "session.key"
+    assert key.stat().st_mode & 0o077 == 0  # readable by the app's user only
+    key.write_text("")  # damaged, e.g. a crash while writing
+    auth._keys.clear()
+    assert not auth.check(token, "admin", "pw") and len(bytes.fromhex(key.read_text())) == 32
+
+
+def test_sign_in_works_when_the_data_folder_is_read_only(signed_out, tmp_path, monkeypatch):
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    monkeypatch.setattr(db, "DB_PATH", ro / "x.db")
+    ro.chmod(0o555)
+    try:
+        auth._keys.clear()
+        token = auth.issue("admin", "hunter2", 3600)
+        assert auth.check(token, "admin", "hunter2")
+    finally:
+        ro.chmod(0o755)
+
+
+def test_secure_cookies_can_be_forced(signed_out, monkeypatch):
+    assert "Secure" not in cookies(sign_in(signed_out))[0]
+    monkeypatch.setattr(main, "SECURE_COOKIES", True)
+    assert "Secure" in cookies(sign_in(signed_out))[0]
 
 
 def test_stored_files_cannot_run_as_pages(client):

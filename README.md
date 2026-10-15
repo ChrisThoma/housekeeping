@@ -98,9 +98,15 @@ The volume name is the same wherever you put the folder. Check it with `docker v
 
 - **To reach it from other devices**, set `HOST=0.0.0.0` in `.env`. Then **also set `HOUSEKEEPING_PASSWORD`**. Without it, anyone who can reach the port can see your data and spend your API credit, and the app logs a warning at startup.
 - **Names you reach it by:** without a password, the app only answers to IP addresses, `localhost` and local names such as `nas.local` or `nas`. This stops websites you visit from reaching it through your browser (DNS rebinding). To use another name, such as `house.example.com`, add it to `HOUSEKEEPING_ALLOWED_HOSTS`. With a password set, any name works.
-- The app refuses changes sent from other websites' pages, and failed sign-ins are answered at most one per second.
+- With a password set, the app shows a sign-in page that browsers and password managers can save. **Keep me signed in** keeps a browser signed in for 90 days, extended as you use it, up to a year. Without it, you're signed out when the browser closes or after 12 hours of not using the app.
+- **Sign out** (under Settings) signs out only that browser. **Sign out everywhere** signs out every phone and computer, for example after losing one. Changing the password does the same.
+- Sessions are signed with a random key stored as `session.key` next to the database, so they survive restarts and updates. It's kept out of git and the Docker image; don't share it.
+- After 10 wrong passwords within a minute, all sign-ins are refused for a minute, even with the right password. People already signed in aren't affected.
+- Scripts and uptime monitors can use HTTP basic auth (`curl -u admin:password`). Tools that wait to be asked for a password, like `wget`, also work.
+- The app refuses changes sent from other websites' pages.
 - The app is a single process with a SQLite database, so run one container. It isn't designed to scale horizontally.
-- Behind a reverse proxy (Caddy, nginx, Traefik), point it at port 8000. The container trusts `X-Forwarded-*` headers from any address. To narrow that, set `FORWARDED_ALLOW_IPS` to your proxy's address. Uploads can be up to 60 MB, so raise the proxy's body size limit (for nginx, `client_max_body_size 64m`).
+- Behind a reverse proxy (Caddy, nginx, Traefik), point it at port 8000 at the root of a host name, like `house.example.com`; it can't run under a path like `example.com/housekeeping/`. The container trusts `X-Forwarded-*` headers from any address. To narrow that, set `FORWARDED_ALLOW_IPS` to your proxy's address. Uploads can be up to 60 MB, so raise the proxy's body size limit (for nginx, `client_max_body_size 64m`).
+- Over HTTPS, the sign-in cookie is only ever sent over HTTPS, as long as the app can tell the page came over HTTPS. Caddy and Traefik tell it; with nginx, add `proxy_set_header X-Forwarded-Proto $scheme;`, or set `HOUSEKEEPING_SECURE_COOKIES=true`.
 - To keep the data in a host folder instead of a volume (`-v /srv/housekeeping:/data`), make the folder writable by the container's user: `sudo chown -R 1000:1000 /srv/housekeeping`.
 - `GET /api/health` returns `{"ok": true}` without a password. The container's health check uses it, and you can point uptime monitors at it too.
 
@@ -111,7 +117,7 @@ All settings are environment variables. With Docker, put them in `.env`.
 | Variable | Default | What it does |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (none) | Turns on task suggestions, label scanning, Find manuals and document reading. Everything else works without it. |
-| `HOUSEKEEPING_PASSWORD` | (none) | Turns on HTTP basic sign-in for the whole app, except the health check. |
+| `HOUSEKEEPING_PASSWORD` | (none) | Turns on sign-in for the whole app, except the health check. |
 | `HOUSEKEEPING_USERNAME` | `admin` | User name for sign-in. |
 | `HOUSEKEEPING_MODEL` | `claude-opus-5-5` | Claude model to use. |
 | `HOUSEKEEPING_DB` | `/data/housekeeping.db` in Docker, `./housekeeping.db` otherwise | Database path. Documents are stored in a `documents/` folder next to it. |
@@ -119,6 +125,7 @@ All settings are environment variables. With Docker, put them in `.env`.
 | `PORT` | `8000` | Port on the host. |
 | `HOUSEKEEPING_ALLOWED_HOSTS` | (none) | Extra host names the app answers to, comma-separated. A leading dot matches subdomains (`.example.com`), and `*` allows any. |
 | `FORWARDED_ALLOW_IPS` | `*` in Docker | Addresses whose `X-Forwarded-*` headers are trusted. |
+| `HOUSEKEEPING_SECURE_COOKIES` | `false` | Always mark the sign-in cookie HTTPS-only. Set it when you only reach the app over HTTPS. |
 | `HOUSEKEEPING_VERSION` | `latest` | Image tag Compose runs, e.g. `0.2.0` or `0.2`. |
 
 Location, climate notes, hemisphere and plan size are set in the app, under **Settings**.

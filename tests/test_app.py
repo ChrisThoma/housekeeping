@@ -42,9 +42,11 @@ def test_frontend_is_served(client):
 def test_password_protects_everything_but_health(client, monkeypatch):
     monkeypatch.setattr(main, "PASSWORD", "hunter2")
     monkeypatch.setattr(main, "USERNAME", "admin")
+    monkeypatch.setattr(main, "AUTH_FAILURE_DELAY", 0)
     assert client.get("/api/health").status_code == 200
-    r = client.get("/api/plan")
-    assert r.status_code == 401 and r.headers["www-authenticate"].startswith("Basic")
-    assert client.get("/", headers=basic("admin", "wrong")).status_code == 401
+    assert client.get("/api/plan").status_code == 401
+    for page in ["/", "/docs", "/openapi.json"]:  # pages send you to the sign-in page
+        r = client.get(page, headers=basic("admin", "wrong"), follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/login"), page
     assert client.get("/api/plan", headers={"Authorization": "Basic !!!"}).status_code == 401
     assert client.get("/api/plan", headers=basic("admin", "hunter2")).status_code == 200

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sign in · Housekeeping</title>
+<meta name="theme-color" content="#f7f7f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/style.css">
+<script>
+  try { const t = localStorage.getItem("hk-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
+</head>
+<body class="sign-in">
+<main>
+  <!-- A plain form post, so browsers and password managers offer to save the sign-in. -->
+  <form class="card sign-in-card" method="post" action="/login">
+    <img src="/static/icon-192.png" width="40" height="40" alt="">
+    <h1>Housekeeping</h1>
+    <p class="sign-in-error" id="login-error" hidden role="alert">That user name and password don't match.</p>
+    <input type="hidden" name="next" value="">
+    <label>User name <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <label class="remember"><input type="checkbox" name="remember" value="true" checked> Keep me signed in</label>
+    <button class="btn" type="submit">Sign in</button>
+  </form>
+</main>
+<script>
+  // The tab you were on (#tasks, say) stays in the address bar but isn't sent to the server; keep it for afterwards.
+  const next = document.querySelector('[name="next"]');
+  if (location.hash && !next.value.includes("#")) next.value += location.hash;
+</script>
+</body>
+</html>

@@ -11,3 +11,4 @@ data/
 tests/
 docs/
 docker-compose*.yml
+session.key

@@ -6,19 +6,21 @@ import logging
 import os
 import secrets
 import threading
+import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
+from html import escape
 from pathlib import Path
 from typing import Literal, Optional
 
 import anthropic
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from . import __version__, ai, db, documents, scheduler
+from . import __version__, ai, auth, db, documents, scheduler
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -32,7 +34,12 @@ USERNAME = os.environ.get("HOUSEKEEPING_USERNAME") or "admin"
 ALLOWED_HOSTS = [h.strip().lower() for h in os.environ.get("HOUSEKEEPING_ALLOWED_HOSTS", "").split(",") if h.strip()]
 LOCAL_SUFFIXES = (".localhost", ".local", ".lan", ".home", ".home.arpa", ".internal")
 MAX_REQUEST_BYTES = documents.MAX_BYTES + 4 * 1024 * 1024  # the largest upload plus form overhead
-AUTH_FAILURE_DELAY = 1.0  # seconds; failed sign-ins are answered one at a time, so guessing is slow
+AUTH_FAILURE_DELAY = 1.0  # seconds before answering a wrong password
+# At most this many wrong passwords per window, across everyone. Past that, every sign-in attempt is refused,
+# right or wrong, until the window has passed, so an attacker can't learn anything by guessing faster.
+FAILURE_LIMIT, FAILURE_WINDOW = 10, 60
+# Mark the cookie Secure even when the app can't tell the page came over HTTPS (a proxy without X-Forwarded-Proto).
+SECURE_COOKIES = os.environ.get("HOUSEKEEPING_SECURE_COOKIES", "").lower() in ("1", "true", "yes")
 
 
 @asynccontextmanager
@@ -73,33 +80,66 @@ def _cross_site(request: Request) -> bool:
     return urllib.parse.urlsplit(origin).netloc.lower() != host.lower()
 
 
-_auth_gate: Optional[asyncio.Lock] = None
-_auth_waiting = 0
+_failures: list[float] = []  # times of recent wrong passwords
 
 
-async def _failed_sign_in() -> Response:
-    global _auth_gate, _auth_waiting
-    if _auth_waiting >= 20:
-        return Response("Too many sign-in attempts. Wait a minute and try again.", 429)
-    _auth_gate = _auth_gate or asyncio.Lock()
-    _auth_waiting += 1
-    try:
-        async with _auth_gate:
-            await asyncio.sleep(AUTH_FAILURE_DELAY)
-    finally:
-        _auth_waiting -= 1
-    return Response("Sign in to use Housekeeping.", 401, {"WWW-Authenticate": 'Basic realm="Housekeeping"'})
+def _locked_out() -> bool:
+    cutoff = time.monotonic() - FAILURE_WINDOW
+    _failures[:] = [t for t in _failures if t > cutoff]
+    return len(_failures) >= FAILURE_LIMIT
 
 
-def _signed_in(request: Request) -> bool:
+TOO_MANY = "Too many wrong passwords. Wait a minute and try again."
+
+
+async def _wrong_password():
+    _failures.append(time.monotonic())
+    await asyncio.sleep(AUTH_FAILURE_DELAY)
+
+
+def _credentials_ok(user: str, pw: str) -> bool:
+    return secrets.compare_digest(user.encode(), USERNAME.encode()) & secrets.compare_digest(pw.encode(), PASSWORD.encode())
+
+
+def _basic_auth(request: Request) -> Optional[bool]:
+    """None when there's no Authorization header; otherwise whether it's right. For scripts and monitors."""
     header = request.headers.get("authorization", "")
     if not header.lower().startswith("basic "):
-        return False
+        return None
     try:
         user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
     except (ValueError, UnicodeDecodeError):
         return False
-    return secrets.compare_digest(user.encode(), USERNAME.encode()) & secrets.compare_digest(pw.encode(), PASSWORD.encode())
+    return _credentials_ok(user, pw)
+
+
+def _session(request: Request) -> Optional[tuple[int, int, int]]:
+    token = request.cookies.get(auth.COOKIE)
+    return auth.check(token, USERNAME, PASSWORD) if token else None
+
+
+def _set_session(response: Response, request: Request, seconds: int, first: Optional[int] = None):
+    """Remembered sessions get a lasting cookie; short ones a cookie that ends when the browser closes."""
+    persistent = seconds > auth.SHORT_SECONDS
+    response.set_cookie(auth.COOKIE, auth.issue(USERNAME, PASSWORD, seconds, first), max_age=seconds if persistent else None,
+                        httponly=True, samesite="lax", secure=SECURE_COOKIES or request.url.scheme == "https", path="/")
+
+
+def _sets_session_cookie(response: Response) -> bool:
+    return any(h.startswith(auth.COOKIE + "=") for h in response.headers.getlist("set-cookie"))
+
+
+def _here(request: Request) -> str:
+    return request.url.path + (f"?{request.url.query}" if request.url.query else "")
+
+
+def _safe_next(target: Optional[str]) -> str:
+    """Only ever send people back to a page on this site."""
+    return target if target and target.startswith("/") and not target.startswith(("//", "/\\")) else "/"
+
+
+# Reachable without signing in: the sign-in page and what it needs, the health check, and signing out.
+PUBLIC_PATHS = ("/api/health", "/login", "/logout")
 
 
 @app.middleware("http")
@@ -118,9 +158,28 @@ async def guard(request: Request, call_next):
             return Response("Send a Content-Length header.", 411)
         if length and (not length.isdigit() or int(length) > MAX_REQUEST_BYTES):
             return Response("That upload is larger than 60 MB.", 413)
-    if PASSWORD and not _signed_in(request):
-        return await _failed_sign_in()
+    session = None
+    if PASSWORD and not (request.url.path in PUBLIC_PATHS or request.url.path.startswith("/static/")):
+        session = _session(request)
+        if not session:
+            basic = _basic_auth(request)
+            if basic is not None and _locked_out():
+                return Response(TOO_MANY, 429)
+            if basic is False:
+                await _wrong_password()
+            if not basic:
+                page = not request.url.path.startswith("/api/") or request.headers.get("sec-fetch-mode") == "navigate"
+                if page:  # a person opening a page (or a manual in a new tab): send them to sign in
+                    return RedirectResponse(f"/login?next={urllib.parse.quote(_here(request))}", 303)
+                # Scripts that only send a password when asked (wget, many HTTP libraries) need the challenge;
+                # the app's own requests come with Sec-Fetch headers and mustn't get one, or the browser pops up a prompt.
+                challenge = {} if request.headers.get("sec-fetch-site") else {"WWW-Authenticate": 'Basic realm="Housekeeping"'}
+                return JSONResponse({"detail": "Sign in to use Housekeeping."}, 401, challenge)
     response = await call_next(request)
+    if session and not _sets_session_cookie(response):  # never undo a sign-out or a new sign-in
+        seconds = auth.renewal(session)
+        if seconds:
+            _set_session(response, request, seconds, first=session[0])  # keep an active sign-in alive
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         # Check for a newer copy on every load (cheap: unchanged files come back as 304), so after an update
         # the browser never pairs the new page with an old stylesheet or script.
@@ -265,10 +324,49 @@ def health():
     return {"ok": True}
 
 
+@app.api_route("/login", methods=["GET", "HEAD"])
+def login_page(request: Request, next: Optional[str] = None, error: Optional[str] = None):
+    if not PASSWORD or _session(request):
+        return RedirectResponse(_safe_next(next), 303)
+    html = (STATIC / "login.html").read_text(encoding="utf-8").replace('"/static/style.css"', f'"/static/style.css?v={__version__}"')
+    html = html.replace('name="next" value=""', f'name="next" value="{escape(_safe_next(next))}"')
+    if error:
+        html = html.replace('id="login-error" hidden', 'id="login-error"')
+        html = html.replace('autocomplete="current-password"', 'autocomplete="current-password" aria-invalid="true" aria-describedby="login-error"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/login")
+async def login(request: Request, username: str = Form(""), password: str = Form(""),
+                remember: bool = Form(False), next: str = Form("/")):
+    target = _safe_next(next)
+    if not PASSWORD:
+        return RedirectResponse(target, 303)
+    if _locked_out():  # checked before the password, so a right guess looks the same as a wrong one
+        return HTMLResponse(TOO_MANY, 429)
+    if not _credentials_ok(username, password):
+        await _wrong_password()
+        return RedirectResponse(f"/login?error=1&next={urllib.parse.quote(target)}", 303)
+    response = RedirectResponse(target, 303)
+    _set_session(response, request, auth.REMEMBER_SECONDS if remember else auth.SHORT_SECONDS)
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request, everywhere: bool = Form(False)):
+    """Sign this browser out. With everywhere, replace the signing key so every browser is signed out."""
+    if everywhere and PASSWORD and _session(request):
+        auth.rotate()
+    response = RedirectResponse("/login" if PASSWORD else "/", 303)
+    response.delete_cookie(auth.COOKIE, path="/")
+    return response
+
+
 @app.get("/api/status")
 def status():
     return {
         "version": __version__,
+        "sign_in": bool(PASSWORD),
         "ai_configured": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
         "model": ai.MODEL,
     }
@@ -802,7 +900,7 @@ def more_plan(as_of: Optional[str] = None, n: int = Query(1, ge=1, le=20)):
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def index():
     # Version the stylesheet and script URLs, so browsers holding copies from an older release fetch the new ones.
     html = (STATIC / "index.html").read_text(encoding="utf-8")

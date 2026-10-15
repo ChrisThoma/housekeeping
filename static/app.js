@@ -40,6 +40,16 @@ async function api(method, path, body) {
     headers: body && !isForm ? { "Content-Type": "application/json" } : {},
     body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {
+    if (document.querySelector("dialog[open]")) {
+      // Don't throw away a half-filled form: sign in in another tab, then save again.
+      toast("You've been signed out, so that wasn't saved. Sign in again in a new tab, then save.", true);
+    } else {
+      // Signed out, or the session ran out: go sign in, then come back here.
+      location.href = `/login?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
+    }
+    throw new ApiError("signed out");
+  }
   if (!res.ok) {
     let msg = `Something went wrong (${res.status})`;
     try {
@@ -985,6 +995,7 @@ $("#theme-btn").addEventListener("click", () => {
 async function loadStatus() {
   const s = await api("GET", "/api/status");
   $("#about-version").textContent = s.version;
+  $("#about-account").hidden = !s.sign_in;
   $("#about-ai").innerHTML = s.ai_configured ? `Connected <span class="muted">· ${esc(s.model)}</span>` : `Not connected. Set <code>ANTHROPIC_API_KEY</code> and restart.`;
   let dismissed = false;
   try { dismissed = localStorage.getItem("hk-banner-dismissed") === "1"; } catch {}
