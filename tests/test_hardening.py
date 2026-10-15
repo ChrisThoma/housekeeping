@@ -653,3 +653,33 @@ def test_unknown_items_are_a_clear_error(client):
     r = client.post("/api/documents/upload", data={"asset_id": 999, "read": "false"},
                     files={"file": ("m.txt", b"Clean the coils yearly.\n" * 20, "text/plain")})
     assert r.status_code == 404 and client.get("/api/documents").json() == []
+
+
+# ---------- fourth review ----------
+
+def test_pausing_and_resuming_keeps_the_plan_size(client):
+    client.put("/api/settings", json={"plan_count": "2"})
+    a, b, c = (task(client, title=n) for n in ("A", "B", "C"))
+    plan = lambda: [i["title"] for i in client.get("/api/plan").json()["items"]]
+    assert plan() == ["A", "B"]
+    client.post(f"/api/tasks/{a['id']}/status/paused")
+    assert plan() == ["B", "C"]
+    client.post(f"/api/tasks/{a['id']}/status/active")
+    assert len(plan()) == 2
+
+
+def test_snoozing_a_moved_task_takes_it_out_of_the_plan(client):
+    oil = _move_to_another_car(client)
+    assert oil["id"] in [i["id"] for i in client.get("/api/plan").json()["items"]]
+    client.post(f"/api/tasks/{oil['id']}/snooze?days=14")
+    assert oil["id"] not in [i["id"] for i in client.get("/api/plan").json()["items"]]
+
+
+def test_a_zero_mile_reading_counts(client):
+    car = client.post("/api/assets", json={"category": "vehicle", "name": "New car"}).json()
+    oil = task(client, title="Oil change", recurrence="mileage", mileage_interval=5000, asset_id=car["id"])
+    client.post("/api/completions", json={"task_id": oil["id"], "mileage": 0, "done_on": "2026-10-01"})
+    assert client.get("/api/assets").json()[0]["mileage"] == 0
+    client.put(f"/api/assets/{car['id']}", json={"category": "vehicle", "name": "New car", "mileage": 5000})
+    status = [t for t in client.get("/api/tasks").json() if t["id"] == oil["id"]][0]
+    assert status["score"] == 1.0 and status["reason"].startswith("5,000 mi since last")

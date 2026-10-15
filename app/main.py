@@ -912,23 +912,30 @@ def set_task_status(task_id: int, status: str):
     with db.connect() as conn:
         _require(conn, "tasks", task_id, "Task")
         conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+        if status == "paused":
+            # Otherwise the plan tops up past it while paused, and has one too many when you resume it.
+            _free_plan_slot(conn, task_id)
     return {"ok": True}
+
+
+def _free_plan_slot(conn, task_id: int):
+    """Take a task out of the current plan, unless it was already done this period (on the item it's on now)."""
+    period, start, end = scheduler.period_for(db.get_settings(conn).get("plan_mode", "weekly"), clock())
+    done = conn.execute(f"""SELECT 1 FROM completions c JOIN tasks t ON t.id = c.task_id
+                            WHERE c.task_id = ? AND c.done_on BETWEEN ? AND ? AND {scheduler.ON_CURRENT_ITEM}""",
+                        (task_id, start.isoformat(), end.isoformat())).fetchone()
+    if not done:
+        conn.execute("DELETE FROM plan_items WHERE task_id = ? AND period = ?", (task_id, period))
 
 
 @app.post("/api/tasks/{task_id}/snooze")
 def snooze_task(task_id: int, days: int = Query(7, ge=1, le=3650), as_of: Optional[str] = None):
     _no_preview(as_of)
-    d = clock()
-    until = d + timedelta(days=days)
+    until = clock() + timedelta(days=days)
     with db.connect() as conn:
         _require(conn, "tasks", task_id, "Task")
         conn.execute("UPDATE tasks SET snoozed_until = ? WHERE id = ?", (until.isoformat(), task_id))
-        # Free its slot in the current plan, unless it was already done this period.
-        period, start, end = scheduler.period_for(db.get_settings(conn).get("plan_mode", "weekly"), d)
-        done = conn.execute("SELECT 1 FROM completions WHERE task_id = ? AND done_on BETWEEN ? AND ?",
-                            (task_id, start.isoformat(), end.isoformat())).fetchone()
-        if not done:
-            conn.execute("DELETE FROM plan_items WHERE task_id = ? AND period = ?", (task_id, period))
+        _free_plan_slot(conn, task_id)
     return {"snoozed_until": until.isoformat()}
 
 
@@ -953,9 +960,10 @@ def complete(c: CompletionIn, as_of: Optional[str] = None):
         asset = conn.execute("SELECT * FROM assets WHERE id = ?", (task["asset_id"],)).fetchone() if task["asset_id"] else None
         vehicle = asset is not None and asset["category"] == "vehicle"
         mileage, prev = c.mileage, None
-        if mileage is None and task["recurrence"] == "mileage" and vehicle and asset["mileage"]:
+        # Compared with None throughout: 0 is a real reading, e.g. a new car.
+        if mileage is None and task["recurrence"] == "mileage" and vehicle and asset["mileage"] is not None:
             mileage = asset["mileage"]  # done now with no reading: count miles from the car's last known odometer
-        elif c.mileage and vehicle and c.mileage > (asset["mileage"] or 0):
+        elif mileage is not None and vehicle and (asset["mileage"] is None or mileage > asset["mileage"]):
             prev = asset["mileage"] if asset["mileage"] is not None else -1  # -1: the car had no reading before
         cur = conn.execute(
             "INSERT INTO completions (task_id, done_on, mileage, notes, prev_asset_mileage, asset_id) VALUES (?, ?, ?, ?, ?, ?)",

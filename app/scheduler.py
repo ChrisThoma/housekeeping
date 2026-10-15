@@ -82,7 +82,8 @@ def evaluate(task: dict, last: dict | None, asset: dict | None, today: date) -> 
         due_dates.append(due)
         reasons.append(f"{elapsed}d since last (every {task['interval_days']}d)")
 
-    if kind == "mileage" and task.get("mileage_interval") and asset and asset.get("mileage") and last and last.get("mileage"):
+    if (kind == "mileage" and task.get("mileage_interval") and asset and asset.get("mileage") is not None
+            and last and last.get("mileage") is not None):  # 0 is a real reading
         driven = asset["mileage"] - last["mileage"]
         scores.append(driven / task["mileage_interval"])
         reasons.append(f"{driven:,} mi since last (every {task['mileage_interval']:,})")

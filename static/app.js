@@ -937,7 +937,7 @@ async function loadHistory() {
       <li class="row" tabindex="-1">
         <div class="row-main">
           <div class="row-title">${esc(r.title)}</div>
-          <div class="row-meta">${esc(meta([r.asset_name || "Whole home", r.mileage && `${Number(r.mileage).toLocaleString()} mi`, r.notes]))}</div>
+          <div class="row-meta">${esc(meta([r.asset_name || "Whole home", r.mileage != null && `${Number(r.mileage).toLocaleString()} mi`, r.notes]))}</div>
         </div>
         <div class="row-actions">
           <button class="btn quiet small icon danger reveal" data-undo="${r.id}" aria-label="Remove entry">${ic("trash")}</button>
