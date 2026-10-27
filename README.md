@@ -21,6 +21,8 @@
 
 </div>
 
+More about it: [individuation.dev/projects/housekeeping](https://individuation.dev/projects/housekeeping/).
+
 ## Features
 
 - **Inventory of everything that needs care.** Appliances, home systems, outdoor features, plants and lawn, and vehicles with model year and odometer reading.
