@@ -33,7 +33,7 @@ More about it: [individuation.dev/projects/housekeeping](https://individuation.d
 - **Reads the manuals.** *Find manuals* searches the web for an item's owner's manual and downloads it. Spec sheets and parts pages are discarded. You can also upload PDFs or photos of a data plate, or paste a link. Claude notes the maintenance intervals with page numbers, part numbers and filter sizes, and suggestions follow the manufacturer's intervals.
 - **Imports your own checklist.** Under **Tasks → Import a checklist**, paste it, or upload a PDF or photo, and each recurring item becomes a task.
 - **A logbook.** Every completion is recorded with the date, odometer reading and notes.
-- **Self-hosted and private.** One container and a SQLite file. No account and no telemetry. It uses your system font and makes no third-party requests except to the Anthropic API.
+- **Self-hosted and private.** One container and a SQLite file. No account and no telemetry. It uses your system font, and its only outside requests go to the Anthropic API and to the public websites it downloads manuals from.
 - **Works on a phone.** Responsive layout with a bottom tab bar, light and dark themes, and it can be installed to your home screen.
 
 <table>
